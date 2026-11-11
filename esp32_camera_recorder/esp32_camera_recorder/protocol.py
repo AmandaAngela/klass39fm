@@ -11,8 +11,9 @@ HEADER = struct.Struct("<4sBcHII")
 PACKET_V2 = struct.Struct("<IIHHHbBB6s6s6s6s")
 PACKET_V3 = struct.Struct("<IIHHHbBB6s6s6s6sBBBb")
 PACKET = PACKET_V2  # original layout, retained for existing callers and fixtures
-LAYOUTS = {2: PACKET_V2, 3: PACKET_V3}
+LAYOUTS = {2: PACKET_V2, 3: PACKET_V3, 4: PACKET_V3}
 STATUS = struct.Struct("<10IQbBB32s32s16s")
+RADIO = struct.Struct("<Bb")
 CRC = struct.Struct("<I")
 COUNTERS = ("eligible", "overflow", "malformed", "unsupported", "rx_errors", "high_water",
             "sent", "tx_errors", "tx_lost", "tune_errors")
@@ -60,7 +61,7 @@ class Decoder:
             layout = LAYOUTS.get(version)
             good_size = layout is not None and (
                 kind == b"P" and 0 < n <= 32 * layout.size and n % layout.size == 0
-                or kind in (b"B", b"S", b"E") and n == STATUS.size)
+                or kind in (b"B", b"S", b"E") and n == STATUS.size + (RADIO.size if version == 4 else 0))
             if not good_size:
                 self.errors["bad_headers"] += 1
                 del self.buf[0]
@@ -85,11 +86,16 @@ class Decoder:
 
 
 def status_fields(payload):
-    *nums, sha, idf, target = STATUS.unpack(payload)
+    *nums, sha, idf, target = STATUS.unpack_from(payload)
     names = (*COUNTERS, "uptime_us", "mode", "channel", "locked")
-    return dict(zip(names, nums), firmware_sha256=sha.hex(),
+    fields = dict(zip(names, nums), firmware_sha256=sha.hex(),
                 idf=idf.split(b"\0")[0].decode("ascii", "replace"),
                 target=target.split(b"\0")[0].decode("ascii", "replace"))
+    if len(payload) == STATUS.size + RADIO.size:
+        primary, offset = RADIO.unpack_from(payload, STATUS.size)
+        fields.update(reported_primary=primary, reported_secondary={-1: "below", 0: "none",
+                      1: "above"}.get(offset, "unknown"))
+    return fields
 
 
 def layout_for(payload):

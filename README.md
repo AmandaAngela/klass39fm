@@ -70,4 +70,52 @@ python $rec --port $port --camera $camera --state motion-triggered --channel $ch
 
 Recording files contain real wireless addresses and experiment notes. Keep original sessions and local research logs in private storage.
 
+## Optional experiment settings
+
+For a fixed-channel 40 MHz experiment, flash the updated firmware and add
+`--secondary above` or `--secondary below` to the recording command. Match the
+access point's primary channel and secondary position. Both 20 MHz channels
+must fit in channels 1–13. For example:
+
+```powershell
+python $rec --port $port --camera $camera --state streaming --channel 6 --secondary above --duration 60
+```
+
+Only this option uses the extended WFS2 v4 status. The recorder compares driver
+readback (`reported_primary` and `reported_secondary`) with the request. To test
+physical reception, use a known HT40 transmitter and look for its data rows with
+`phy_sig_mode=1` and `phy_cwb=1`. A successful tune alone measures configuration.
+Leave out `--secondary` for the original recording commands and firmware.
+
+Optionally pass `--labels labels.json` with any recording. The recorder copies
+these operator annotations into `session.json`. Times are seconds from BEGIN;
+omitting start or end means session start or session end. The same device may
+have several activity intervals. For example:
+
+```json
+[
+  {"mac":"02:00:00:00:00:01","alias":"camera A","device_class":"camera","activity":"live view","start_s":10,"end_s":40},
+  {"mac":"02:00:00:00:00:02","alias":"phone B","device_class":"phone","activity":"video call"}
+]
+```
+
+For existing or new fixed-channel recordings, export outgoing traffic for one
+device in 100 ms windows, or opt into elapsed-time rates in the usual summary:
+
+```powershell
+$features = 'esp32_camera_recorder/esp32_camera_recorder/device_features.py'
+python $features $folder --mac $camera --burst-windows
+python $features $folder --mac $camera --measured-duration
+```
+
+Window output is CSV (or use `--json`). Its time origin is the first observed
+Wi-Fi frame; it ends with the window containing the last observed frame.
+Empty intervening windows have zero counts. Lengths include Wi-Fi overhead and
+retries; retry counts are shown separately. Only data subtypes carrying data are
+included. A new burst starts after a gap of at least 10 ms. Adjust this analysis
+threshold with `--burst-gap-ms` and window size with `--window-ms`. Gap and
+burst-period medians use the later frame's window. These bursts describe radio
+traffic. The optional measured duration uses device BEGIN through END (including
+the final drain). Default summary calculations retain their original denominator.
+
 For a read-only consistency check, run `python esp32_camera_recorder/esp32_camera_recorder/audit_recording.py <session-folder>`. It replays the raw file, compares every decoded measurement, filtered row and status record against the exports, and checks terminal counts. Host receipt times exist only in the exports. A passing replay can still report firmware drops.

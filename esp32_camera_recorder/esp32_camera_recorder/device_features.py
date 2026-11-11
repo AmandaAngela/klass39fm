@@ -24,6 +24,7 @@ import argparse
 import csv
 import json
 import statistics
+import sys
 from pathlib import Path
 
 BROADCAST = "ff:ff:ff:ff:ff:ff"
@@ -93,6 +94,69 @@ def active_macs(rows, floor):
     return [m for m, n in sorted(counts.items(), key=lambda kv: -kv[1]) if n >= floor]
 
 
+def measured_seconds(folder):
+    begin = end = None
+    with (folder / "status.jsonl").open(encoding="utf8") as stream:
+        for line in stream:
+            status = json.loads(line)
+            if status["kind"] == "B":
+                begin = status["uptime_us"]
+            elif status["kind"] == "E":
+                end = status["uptime_us"]
+    if begin is None or end is None or end <= begin:
+        raise ValueError(f"{folder}: measured duration needs valid BEGIN and END timestamps")
+    return (end - begin) / 1e6
+
+
+def burst_windows(rows, mac, window_ms, burst_gap_ms):
+    """Bin by the RX clock relative to the first observation, retaining empty windows."""
+    if not rows:
+        return
+    previous_clock = int(rows[0]["esp_timestamp_us"])
+    elapsed = 0
+    outgoing = []
+    last_us = 0
+    for r in rows:
+        clock = int(r["esp_timestamp_us"])
+        # A forward wrap has a small positive modular difference. Reject ambiguous
+        # gaps or out-of-order clocks rather than inserting ~72 minutes of silence.
+        delta = (clock - previous_clock) % (1 << 32)
+        if delta >= 1 << 31:
+            raise ValueError("RX clock moved backwards or gap is ambiguous; inspect the session")
+        elapsed += delta
+        previous_clock = clock
+        last_us = elapsed
+        if (r["addr2_ta"] == mac and r["frame_type"] == "2"
+                and not int(r["frame_subtype"]) & 4):
+            outgoing.append((elapsed, int(r["frame_length_bytes"]), int(r["retry"])))
+
+    width = window_ms * 1000
+    i = 0
+    previous_tx = previous_burst = None
+    for left in range(0, last_us + 1, width):
+        frames = size = retries = starts = 0
+        gaps, periods = [], []
+        while i < len(outgoing) and outgoing[i][0] < left + width:
+            stamp, length, retry = outgoing[i]
+            i += 1
+            gap = None if previous_tx is None else stamp - previous_tx
+            if gap is not None:
+                gaps.append(gap)
+            if gap is None or gap >= burst_gap_ms * 1000:
+                starts += 1
+                if previous_burst is not None:
+                    periods.append(stamp - previous_burst)
+                previous_burst = stamp
+            previous_tx = stamp
+            frames += 1
+            size += length
+            retries += retry
+        yield dict(start_ms=left // 1000, tx_frames=frames, tx_frame_bytes=size,
+                   retry_frames=retries, burst_starts=starts,
+                   median_tx_gap_us=statistics.median(gaps) if gaps else None,
+                   median_burst_period_us=statistics.median(periods) if periods else None)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -101,12 +165,35 @@ def main():
                    help="restrict to these MACs; default is every device with >=200 frames")
     p.add_argument("--floor", type=int, default=200)
     p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    p.add_argument("--measured-duration", action="store_true",
+                   help="use elapsed device time from BEGIN to END for session rates")
+    p.add_argument("--burst-windows", action="store_true",
+                   help="output outgoing data frames per time window for one --mac (CSV or --json)")
+    p.add_argument("--window-ms", type=int, default=100)
+    p.add_argument("--burst-gap-ms", type=int, default=10,
+                   help="minimum idle gap that starts another burst (default 10 ms)")
     args = p.parse_args()
+    if args.burst_windows and (len(args.mac) != 1 or args.window_ms <= 0 or args.burst_gap_ms <= 0):
+        p.error("--burst-windows requires exactly one --mac and positive window/gap sizes")
 
     out = []
     for folder in args.folders:
         rows, meta = load(folder)
-        duration = meta.get("requested_seconds") or 90.0
+        if args.burst_windows:
+            if meta.get("requested_mode", -1) < 1:
+                p.error(f"{folder}: use a fixed-channel recording for burst analysis")
+            mac = args.mac[0].lower().replace("-", ":")
+            try:
+                out.extend(dict(session=folder.name, mac=mac, **w) for w in
+                           burst_windows(rows, mac, args.window_ms, args.burst_gap_ms))
+            except ValueError as exc:
+                p.error(str(exc))
+            continue
+        try:
+            duration = measured_seconds(folder) if args.measured_duration else (
+                meta.get("requested_seconds") or 90.0)
+        except (OSError, ValueError) as exc:
+            p.error(str(exc))
         for mac in (args.mac or active_macs(rows, args.floor)):
             f = features(rows, mac, duration)
             if f:
@@ -115,6 +202,12 @@ def main():
 
     if args.json:
         print(json.dumps(out, indent=2))
+        return
+    if args.burst_windows:
+        writer = csv.DictWriter(sys.stdout, fieldnames=("session", "mac", "start_ms", "tx_frames",
+            "tx_frame_bytes", "retry_frames", "burst_starts", "median_tx_gap_us", "median_burst_period_us"))
+        writer.writeheader()
+        writer.writerows(out)
         return
 
     hdr = ("session", "state", "mac", "frames/s", "nullShr", "upShrC", "upShrD",

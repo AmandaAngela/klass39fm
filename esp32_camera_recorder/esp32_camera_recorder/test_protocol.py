@@ -1,4 +1,5 @@
 """Regression cases for resynchronization, exact retention and address semantics."""
+import argparse
 import csv
 import json
 import tempfile
@@ -13,7 +14,8 @@ import serial
 from audit_recording import audit
 from protocol import (CRC, Decoder, FIELDS, HEADER, MAGIC, PACKET, PACKET_V3, PHY_FIELDS,
                       STATUS, rows)
-from record_wifi import Session, record
+from record_wifi import Session, record, load_labels
+from device_features import burst_windows, measured_seconds
 
 
 def wire(kind, number, payload, version=2):
@@ -33,6 +35,60 @@ def packet_v3(ident, fc, phy=0, mcs=0, rate=11, noise=-96):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_default_and_ht40_session_commands_and_audit(self):
+        for secondary, version, verb in ((None, 3, "START"), ("above", 4, "WIDE+"),
+                                          ("below", 4, "WIDE-")):
+            with self.subTest(secondary=secondary), tempfile.TemporaryDirectory() as tmp, \
+                    patch("record_wifi.serial.Serial") as factory, \
+                    patch("record_wifi.secrets.randbelow", return_value=122):
+                link = factory.return_value.__enter__.return_value
+                def status(elapsed, count):
+                    body = STATUS.pack(count, 0, 0, 0, 0, count, count, 0, 0, 0,
+                                       elapsed, 6, 6, 1, bytes(32), b"test", b"esp32s3")
+                    if secondary:
+                        body += bytes((6, 1 if secondary == "above" else 255))
+                    return body
+                link.read.side_effect = [wire(b"B", 0, status(100, 0), version),
+                                         wire(b"P", 1, packet_v3(1, 8), version),
+                                         wire(b"E", 2, status(1000100, 1), version)]
+                link.in_waiting = 500
+                args = SimpleNamespace(output=tmp, state="unknown", channel=6, port="test",
+                    baud=115200, camera=None, duration=0.1, notes="", secondary=secondary)
+                with patch("record_wifi.time.monotonic", side_effect=[0, 0.1, 0.5, 1.1]):
+                    self.assertEqual(record(args), 0)
+                self.assertEqual(link.write.call_args_list[0].args,
+                                 (f"\n{verb} 0000007b 6 000000000000\n".encode(),))
+                folder, = Path(tmp).iterdir()
+                self.assertEqual(audit(folder)["rows"], 1)
+                info = json.loads((folder / "session.json").read_text())
+                self.assertEqual(info["latest_firmware_status"].get("reported_secondary"), secondary)
+                self.assertEqual(measured_seconds(folder), 1)
+
+    def test_device_label_intervals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labels.json"
+            label = dict(mac="AA-BB-CC-DD-EE-FF", alias="test", device_class="camera",
+                         activity="streaming", start_s=2, end_s=8)
+            path.write_text(json.dumps([label]))
+            self.assertEqual(load_labels(path)[0]["mac"], "aa:bb:cc:dd:ee:ff")
+            label["end_s"] = 1
+            path.write_text(json.dumps([label]))
+            with self.assertRaisesRegex(argparse.ArgumentTypeError, "end_s"):
+                load_labels(path)
+
+    def test_bursts_across_clock_wrap_include_silent_windows(self):
+        def row(us, subtype="0", retry="0"):
+            return dict(esp_timestamp_us=us % (1 << 32), addr2_ta="device", frame_type="2",
+                        frame_subtype=subtype, retry=retry, frame_length_bytes="100")
+        start = (1 << 32) - 1000
+        sample = [row(start), row(start + 2000, retry="1"), row(start + 150000, "12"),
+                  row(start + 202000)]
+        windows = list(burst_windows(sample, "device", 100, 10))
+        self.assertEqual([w["tx_frame_bytes"] for w in windows], [200, 0, 100])
+        self.assertEqual(windows[0]["retry_frames"], 1)
+        self.assertEqual(windows[0]["median_tx_gap_us"], 2000)
+        self.assertEqual(windows[-1]["median_burst_period_us"], 202000)
+
     def test_fragmentation_corruption_and_recovery(self):
         good = wire(b"P", 1, packet(1, 0x888))
         damaged = bytearray(good)

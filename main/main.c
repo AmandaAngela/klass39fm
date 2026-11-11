@@ -27,17 +27,22 @@ typedef struct __attribute__((packed)) {
     uint8_t firmware_sha[32];
     char idf[32], target[16];
 } status_t;
+typedef struct __attribute__((packed)) {
+    status_t base;
+    uint8_t primary; // driver readback; zero if unavailable
+    int8_t secondary_offset; // +1 above, -1 below, 0 none, 127 unknown
+} wide_status_t;
 // Version 3 adds four PHY bytes per observation (41 -> 45). The magic word stays
 // "WFS2" so a host resynchronising a version-2 archive still finds frame starts;
 // the version byte is what selects the record layout.
 _Static_assert(sizeof(observation_t) == 45 && sizeof(header_t) == 16 &&
-               sizeof(status_t) == 131, "wire schema mismatch");
+               sizeof(status_t) == 131 && sizeof(wide_status_t) == 133, "wire schema mismatch");
 
 static struct {
     header_t header;
     union {
         observation_t packets[BATCH];
-        status_t status;
+        wide_status_t status;
     } body;
     uint8_t trailer[4];
 } frame;
@@ -49,11 +54,14 @@ static size_t pending_count;
 static int mode;
 static uint8_t channel;
 static bool locked;
+static bool wide_session;
+static uint8_t reported_primary;
+static int8_t reported_offset;
 static int64_t next_hop, next_status;
 
 static bool send_frame(char kind, size_t bytes)
 {
-    frame.header = (header_t){.magic = {'W','F','S','2'}, .version = 3, .kind = kind,
+    frame.header = (header_t){.magic = {'W','F','S','2'}, .version = wide_session ? 4 : 3, .kind = kind,
         .bytes = bytes, .token = token, .serial = serial_no};
     size_t length = sizeof(header_t) + bytes;
     uint32_t crc = esp_rom_crc32_le(0, (uint8_t *)&frame, length);
@@ -68,14 +76,16 @@ static bool send_frame(char kind, size_t bytes)
 
 static void status(char kind)
 {
-    status_t *s = &frame.body.status;
+    status_t *s = &frame.body.status.base;
     *s = (status_t){.capture = capture_stats(), .sent = sent, .tx_errors = tx_errors,
         .tx_lost = tx_lost, .tune_errors = tune_errors, .uptime_us = esp_timer_get_time(),
         .mode = mode, .channel = channel, .locked = locked, .target = CONFIG_IDF_TARGET};
     const esp_app_desc_t *app = esp_app_get_description();
     memcpy(s->firmware_sha, app->app_elf_sha256, sizeof(s->firmware_sha));
     memcpy(s->idf, app->idf_ver, sizeof(s->idf));
-    send_frame(kind, sizeof(*s));
+    frame.body.status.primary = reported_primary;
+    frame.body.status.secondary_offset = reported_offset;
+    send_frame(kind, wide_session ? sizeof(wide_status_t) : sizeof(*s));
 }
 
 static size_t send_batch(void)
@@ -110,6 +120,7 @@ static void finish(void)
     }
     status('E');
     token = 0;
+    wide_session = false;
 }
 
 static bool tune(uint8_t wanted)
@@ -133,9 +144,14 @@ static void command(const char *line)
         finish();
         return;
     }
-    if (sscanf(line, "START %8lx %d %2hhx%2hhx%2hhx%2hhx%2hhx%2hhx %c",
+    bool above = strncmp(line, "WIDE+ ", 6) == 0;
+    bool below = strncmp(line, "WIDE- ", 6) == 0;
+    if (!above && !below && strncmp(line, "START", 5) != 0) return;
+    if (sscanf(line + 5, "%8lx %d %2hhx%2hhx%2hhx%2hhx%2hhx%2hhx %c",
                &id, &requested, &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5],
                &extra) != 8 || !id || requested < -1 || requested > CHANNELS) return;
+    if ((above || below) && (requested < 1 || (above && requested > CHANNELS - 4)
+            || (below && requested < 5))) return;
     if (id == token) return; // repeated command cannot reset a live session
     if (token) finish(); // allow a fresh recorder after a host disconnect
     capture_configure(mac);
@@ -143,7 +159,25 @@ static void command(const char *line)
     serial_no = sent = tx_errors = tx_lost = tune_errors = 0;
     mode = requested;
     locked = false;
-    bool tuned = tune(mode > 0 ? mode : 1);
+    wide_session = above || below;
+    bool tuned;
+    if (wide_session) {
+        wifi_second_chan_t wanted = above ? WIFI_SECOND_CHAN_ABOVE : WIFI_SECOND_CHAN_BELOW;
+        wifi_second_chan_t actual;
+        reported_primary = 0;
+        reported_offset = 127;
+        esp_err_t set_result = esp_wifi_set_channel(requested, wanted);
+        bool readback = esp_wifi_get_channel(&reported_primary, &actual) == ESP_OK;
+        if (readback) {
+            reported_offset = actual == WIFI_SECOND_CHAN_ABOVE ? 1 :
+                              actual == WIFI_SECOND_CHAN_BELOW ? -1 : 0;
+            channel = reported_primary;
+        }
+        tuned = set_result == ESP_OK && readback && reported_primary == requested && actual == wanted;
+        if (!tuned) tune_errors++;
+    } else {
+        tuned = tune(mode > 0 ? mode : 1);
+    }
     locked = tuned && mode > 0;
     next_hop = esp_timer_get_time() + DWELL_MS * 1000;
     next_status = esp_timer_get_time() + 1000000;

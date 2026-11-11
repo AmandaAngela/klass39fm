@@ -132,6 +132,11 @@ def record(args):
                 camera_state=args.state, requested_mode=args.channel, notes=args.notes,
                 port=args.port, baud=args.baud, requested_seconds=args.duration,
                 camera_filter="addr1_ra or addr2_ta equals camera_mac", result="in_progress")
+    secondary = getattr(args, "secondary", None)
+    if secondary:
+        info.update(requested_width_mhz=40, requested_secondary=secondary)
+    if getattr(args, "labels", None):
+        info["device_labels"] = args.labels
     interrupted = False
 
     def on_interrupt(signum, frame):
@@ -152,7 +157,8 @@ def record(args):
             link.port = args.port
             with link as port:
                 wire_target = args.camera.replace(":", "") if args.camera else "000000000000"
-                start_command = f"\nSTART {token:08x} {args.channel} {wire_target}\n".encode()
+                verb = {"above": "WIDE+", "below": "WIDE-"}.get(secondary, "START")
+                start_command = f"\n{verb} {token:08x} {args.channel} {wire_target}\n".encode()
                 opened = time.monotonic()
                 last_start = last_frame = flushed = opened
                 port.write(start_command)
@@ -165,6 +171,12 @@ def record(args):
                     if old_seq != session.last_seq:
                         last_frame = now
                     if session.begun and began_at is None:
+                        if secondary:
+                            status = session.last_status
+                            if (status.get("reported_primary") != args.channel or
+                                    status.get("reported_secondary") != secondary or not status["locked"]):
+                                port.write(f"STOP {token:08x}\n".encode())
+                                raise RuntimeError("Receiver could not confirm the requested HT40 channel")
                         began_at = now
                     duration_met = began_at is not None and args.duration and now - began_at >= args.duration
                     if (interrupted or duration_met) and stop_sent is None:
@@ -173,6 +185,8 @@ def record(args):
                     if stop_sent is not None and not session.ended and now - stop_sent > 6:
                         raise TimeoutError("STOP sent but final firmware counters did not arrive")
                     if not session.begun and now - opened > 10:
+                        if secondary:
+                            raise TimeoutError("No HT40 BEGIN; check the port and install HT40-capable firmware")
                         raise TimeoutError("No valid BEGIN on this port; check transport, firmware and raw bytes")
                     if session.begun and now - last_frame > 6:
                         raise TimeoutError("No valid session frames or heartbeat for six seconds")
@@ -214,6 +228,29 @@ def record(args):
         return 2 if review else 0
 
 
+def load_labels(path):
+    """Read operator annotations; offsets are seconds from the session BEGIN."""
+    try:
+        labels = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        if not isinstance(labels, list) or not labels:
+            raise ValueError("expected a non-empty JSON list")
+        for entry in labels:
+            if not isinstance(entry, dict) or any(not isinstance(entry.get(k), str) or
+                    not entry[k].strip() for k in ("mac", "alias", "device_class", "activity")):
+                raise ValueError("each label needs mac, alias, device_class and activity")
+            entry["mac"] = camera_mac(entry["mac"])
+            start = entry.setdefault("start_s", 0)
+            end = entry.setdefault("end_s", None)
+            for value in (start,) if end is None else (start, end):
+                if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                    raise ValueError("label times must be nonnegative finite seconds")
+            if end is not None and end <= start:
+                raise ValueError("end_s must exceed start_s")
+        return labels
+    except (OSError, ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--port", required=True, help="serial port of the receiver")
@@ -222,6 +259,10 @@ def main():
     p.add_argument("--state", choices=("unknown", "idle", "streaming", "off", "motion",
                                      "motion-triggered", "background"), default="unknown")
     p.add_argument("--channel", type=channel_mode, help="auto, scan, or channel number")
+    p.add_argument("--secondary", choices=("above", "below"),
+                   help="opt in to HT40 on a fixed channel; select the secondary channel position")
+    p.add_argument("--labels", type=load_labels, metavar="JSON_FILE",
+                   help="optional per-device activity intervals, in seconds from BEGIN")
     p.add_argument("--notes", default="")
     p.add_argument("--output", default="recordings")
     p.add_argument("--duration", type=float, help="seconds after BEGIN; otherwise Ctrl+C")
@@ -230,6 +271,9 @@ def main():
         args.channel = 0 if args.camera else -1
     if args.channel == 0 and not args.camera:
         p.error("--channel auto requires --camera")
+    if args.secondary and (args.channel < 1 or
+            not 1 <= args.channel + (4 if args.secondary == "above" else -4) <= 13):
+        p.error("--secondary requires a fixed primary and secondary channel within 1..13")
     if args.duration is not None and (not math.isfinite(args.duration) or args.duration <= 0):
         p.error("--duration must be positive and finite")
     return record(args)
