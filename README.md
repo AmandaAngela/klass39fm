@@ -81,11 +81,47 @@ must fit in channels 1–13. For example:
 python $rec --port $port --camera $camera --state streaming --channel 6 --secondary above --duration 60
 ```
 
-Only this option uses the extended WFS2 v4 status. The recorder compares driver
+Wide recordings use the extended WFS2 v4 status. The recorder compares driver
 readback (`reported_primary` and `reported_secondary`) with the request. To test
 physical reception, use a known HT40 transmitter and look for its data rows with
 `phy_sig_mode=1` and `phy_cwb=1`. A successful tune alone measures configuration.
 Leave out `--secondary` for the original recording commands and firmware.
+
+### Automatic 20/40 MHz survey for a known MAC
+
+With the HT40-capable firmware installed, the PC recorder can drive the search.
+Keep the test device doing the same activity throughout the comparison.
+
+```powershell
+$rec = 'esp32_camera_recorder/esp32_camera_recorder/record_wifi.py'
+python $rec --port $port --camera $camera --state streaming --channel auto --secondary auto --duration 60
+```
+
+For each primary from 1 through 13 it tries 20 MHz, then each valid secondary
+above or below (four channel numbers away). It spends two seconds recording
+at each setting by default. Increase `--probe-seconds` for a quiet transmitter.
+The search stops at the first primary with a decoded **transmission from the target**
+on that primary. A frame merely addressed to the MAC does not select a channel.
+If one full sweep finds nothing, the result is `target_not_observed`; a quiet
+device or one the receiver cannot decode may still be present. To search only a
+known primary, replace `--channel auto` with its channel number.
+
+Once the target is heard, the recorder takes a fresh fixed-channel recording at
+20 MHz and at **every valid 40 MHz setting on that primary**, including when
+the initial sighting was at 20 MHz. `--duration` applies to each comparison
+(default 60 seconds). Search and comparison runs each have their own raw bytes,
+packet CSVs, timestamps and counters. Label offsets start at each run's BEGIN.
+Ctrl+C ends the whole survey.
+
+Open `survey.json` in the printed survey directory. Compare entries with
+`phase=compare` using target data frames/s, frame bytes/s, retries and counts
+of data frames sent and received at HT40. Width evidence uses the frame's HT
+mode and width flag. An HT40 receiver setting can deliver 20 MHz frames as well.
+Rates use measured BEGIN-to-END time including drain; frame bytes include Wi-Fi
+overhead and retries. Use each comparison folder with `device_features.py
+--burst-windows` to examine timing. Review tune failures, missing target data
+and capture losses alongside the counts. Measurements are sequential, so repeat
+the activity across runs to assess how consistently a difference appears.
 
 Optionally pass `--labels labels.json` with any recording. The recorder copies
 these operator annotations into `session.json`. Times are seconds from BEGIN;

@@ -19,13 +19,16 @@
 # Local research recordings, copies, and handoff notes
 /validation/
 /dataset/
+/finaliser/
+/finaliser.building/
 /backups/
 **/recordings/
 *.zip
+*.pcap
+*.pcapng
 /JOURNAL.md
 /TECHNICAL_PROGRESS.md
 /FEATURE_SEPARATION.md
-/AGENTS.md
 /.vscode/settings.json
 # Recorder output may also be written to a custom --output directory.
 all_wifi_packets.csv

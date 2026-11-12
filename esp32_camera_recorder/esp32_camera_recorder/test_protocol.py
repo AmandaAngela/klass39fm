@@ -16,6 +16,7 @@ from protocol import (CRC, Decoder, FIELDS, HEADER, MAGIC, PACKET, PACKET_V3, PH
                       STATUS, rows)
 from record_wifi import Session, record, load_labels
 from device_features import burst_windows, measured_seconds
+from width_survey import settings, survey
 
 
 def wire(kind, number, payload, version=2):
@@ -35,6 +36,101 @@ def packet_v3(ident, fc, phy=0, mcs=0, rate=11, noise=-96):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_checkpoint_retries_transient_windows_file_lock(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as files:
+            folder = Path(tmp)
+            session = Session({"token": 123, "camera_mac": None}, folder, files)
+            session.checkpoint()
+            previous = (folder / "session.json").read_bytes()
+            session.info["notes"] = "updated"
+            replace = Path.replace
+            attempts = []
+
+            def transient(source, target):
+                attempts.append(source)
+                if len(attempts) < 3:
+                    self.assertEqual((folder / "session.json").read_bytes(), previous)
+                    raise PermissionError("file temporarily held by another process")
+                return replace(source, target)
+
+            with patch.object(Path, "replace", transient), patch("record_wifi.time.sleep"):
+                session.checkpoint()
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(json.loads((folder / "session.json").read_text())["notes"], "updated")
+            with patch.object(Path, "replace", side_effect=PermissionError("still locked")), \
+                    patch("record_wifi.time.sleep"):
+                with self.assertRaises(PermissionError):
+                    session.checkpoint()
+            self.assertTrue((folder / "session.tmp").exists())
+
+    def test_width_survey_finds_target_visible_only_on_wide_pair(self):
+        mac = "02:02:02:02:02:02"
+        with tempfile.TemporaryDirectory() as tmp, patch("record_wifi.serial.Serial") as factory:
+            args = SimpleNamespace(port="test", output=tmp, baud=115200, camera=mac, channel=0,
+                                   state="streaming", notes="", duration=0.5, probe_seconds=0.2)
+            link = factory.return_value.__enter__.return_value
+            link.in_waiting = 500
+            messages = []
+            def write(cmd):
+                nonlocal end
+                verb, token, *config = cmd.decode().split()
+                if verb == "STOP":
+                    messages.append(end)
+                    return
+                primary = int(config[0])
+                wide = verb != "START"
+                version = 4 if wide else 3
+                # Incoming wide data addressed to the target on every setting. Only
+                # the above pair on channel 6 hears its outgoing data-bearing frames.
+                outgoing = primary == 6 and verb == "WIDE+"
+                observations = []
+                for i, (fc, first, second) in enumerate([(8, 2, 1)] +
+                        ([(8, 1, 2), (0xc8, 1, 2)] if outgoing else []), 1):
+                    observations.append(PACKET_V3.pack(i, i, 100, fc, 0, -50, primary, 255,
+                        bytes([first])*6, bytes([second])*6, bytes(6), bytes(6), 5, 1, 0, -90))
+                def status(ts, count):
+                    body = STATUS.pack(count, 0, 0, 0, 0, count, count, 0, 0, 0,
+                                       ts, primary, primary, 1, bytes(32), b"test", b"esp32s3")
+                    return body + (bytes([primary, 1 if verb == "WIDE+" else 255]) if wide else b"")
+                messages.extend([wire(b"B", 0, status(0, 0), version),
+                                 wire(b"P", 1, b"".join(observations), version)])
+                end = wire(b"E", 2, status(1000000, len(observations)), version)
+            end = b""
+            link.write.side_effect = write
+            link.read.side_effect = lambda _: messages.pop(0) if messages else b""
+            with patch("record_wifi.secrets.randbelow", return_value=122), \
+                    patch("record_wifi.time.monotonic", side_effect=(i / 10 for i in range(1000))):
+                self.assertEqual(survey(args, record), 0)
+            root, = Path(tmp).iterdir()
+            report = json.loads((root / "survey.json").read_text())
+            self.assertEqual(report["primary"], 6)
+            matched = [r for r in report["runs"] if r["phase"] == "compare"]
+            self.assertEqual([r["secondary"] for r in matched], ["none", "above", "below"])
+            self.assertEqual([r["target_tx_ht40_data_frames"] for r in matched], [0, 1, 0])
+            self.assertEqual([r["target_rx_ht40_data_frames"] for r in matched], [1, 1, 1])
+            self.assertEqual(matched[1]["target_tx_data_frames_per_s"], 1)
+            for run in report["runs"]:
+                self.assertGreater(audit(root / run["folder"])["rows"], 0)
+
+    def test_width_survey_no_target_and_plan_edges(self):
+        self.assertEqual(list(settings(1)), [None, "above"])
+        self.assertEqual(list(settings(13)), [None, "below"])
+        self.assertEqual(sum(len(list(settings(p))) for p in range(1, 14)), 31)
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(output=tmp, camera="02:00:00:00:00:01", channel=0,
+                                   duration=None, probe_seconds=None)
+            def empty(args, *, folder):
+                folder.mkdir()
+                (folder / "session.json").write_text('{"result":"completed","quality_findings":{"empty_capture":true}}')
+                (folder / "status.jsonl").write_text('{"kind":"B","uptime_us":0}\n{"kind":"E","uptime_us":2000000}\n')
+                (folder / "camera_packets.csv").write_text(",".join(FIELDS) + "\n")
+                return 2
+            self.assertEqual(survey(args, empty), 2)
+            root, = Path(tmp).iterdir()
+            report = json.loads((root / "survey.json").read_text())
+            self.assertEqual(report["result"], "target_not_observed")
+            self.assertEqual(len(report["runs"]), 31)
+
     def test_default_and_ht40_session_commands_and_audit(self):
         for secondary, version, verb in ((None, 3, "START"), ("above", 4, "WIDE+"),
                                           ("below", 4, "WIDE-")):

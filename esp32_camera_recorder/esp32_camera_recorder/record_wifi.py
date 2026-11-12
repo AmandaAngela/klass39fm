@@ -15,6 +15,7 @@ from pathlib import Path
 
 import serial
 from protocol import Decoder, FIELDS, rows, status_fields
+from width_survey import survey
 
 
 def utc():
@@ -118,14 +119,23 @@ class Session:
             snapshot["trailing_observation_gap"] = s["eligible"] - self.last_id
         temp = self.folder / "session.tmp"
         temp.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf8")
-        temp.replace(self.folder / "session.json")
+        # Windows readers and indexers can briefly block an atomic replacement.
+        for attempt in range(10):
+            try:
+                temp.replace(self.folder / "session.json")
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.05)
         return snapshot
 
 
-def record(args):
+def record(args, *, folder=None):
     token = secrets.randbelow(0xffffffff) + 1
-    folder = Path(args.output) / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ_")
-                                   + f"{args.state}_{token:08x}")
+    if folder is None:
+        folder = Path(args.output) / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ_")
+                                      + f"{args.state}_{token:08x}")
     folder.mkdir(parents=True, exist_ok=False)
     print(f"Recording directory {folder.resolve()}", flush=True)
     info = dict(format="WFS2", token=token, opened_utc=utc(), camera_mac=args.camera,
@@ -205,6 +215,8 @@ def record(args):
             print(str(exc), file=sys.stderr)
         finally:
             session.consume(b"", final=True)
+            if interrupted:
+                info["operator_stopped"] = True
             info["closed_utc"] = utc()
             summary = session.checkpoint()
         if info["result"] != "completed":
@@ -259,23 +271,33 @@ def main():
     p.add_argument("--state", choices=("unknown", "idle", "streaming", "off", "motion",
                                      "motion-triggered", "background"), default="unknown")
     p.add_argument("--channel", type=channel_mode, help="auto, scan, or channel number")
-    p.add_argument("--secondary", choices=("above", "below"),
-                   help="opt in to HT40 on a fixed channel; select the secondary channel position")
+    p.add_argument("--secondary", choices=("above", "below", "auto"),
+                   help="fixed HT40 position, or auto to survey HT20 and HT40 for a target MAC")
+    p.add_argument("--probe-seconds", type=float,
+                   help="dwell per search setting with --secondary auto (default 2 seconds)")
     p.add_argument("--labels", type=load_labels, metavar="JSON_FILE",
                    help="optional per-device activity intervals, in seconds from BEGIN")
     p.add_argument("--notes", default="")
     p.add_argument("--output", default="recordings")
-    p.add_argument("--duration", type=float, help="seconds after BEGIN; otherwise Ctrl+C")
+    p.add_argument("--duration", type=float, help="seconds after BEGIN; in a width survey, "
+                   "seconds per comparison recording (default 60)")
     args = p.parse_args()
     if args.channel is None:
         args.channel = 0 if args.camera else -1
     if args.channel == 0 and not args.camera:
         p.error("--channel auto requires --camera")
-    if args.secondary and (args.channel < 1 or
+    if args.secondary in ("above", "below") and (args.channel < 1 or
             not 1 <= args.channel + (4 if args.secondary == "above" else -4) <= 13):
         p.error("--secondary requires a fixed primary and secondary channel within 1..13")
     if args.duration is not None and (not math.isfinite(args.duration) or args.duration <= 0):
         p.error("--duration must be positive and finite")
+    if args.probe_seconds is not None and (args.secondary != "auto" or
+            not math.isfinite(args.probe_seconds) or args.probe_seconds <= 0):
+        p.error("--probe-seconds requires --secondary auto and a positive finite duration")
+    if args.secondary == "auto":
+        if not args.camera or args.channel == -1:
+            p.error("--secondary auto requires --camera and an automatic or fixed primary channel")
+        return survey(args, record)
     return record(args)
 
 

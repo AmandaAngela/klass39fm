@@ -163,14 +163,16 @@ static void command(const char *line)
     bool tuned;
     if (wide_session) {
         wifi_second_chan_t wanted = above ? WIFI_SECOND_CHAN_ABOVE : WIFI_SECOND_CHAN_BELOW;
-        wifi_second_chan_t actual;
+        // The S3 v6.1 driver writes one byte of this enum output.
+        wifi_second_chan_t actual = WIFI_SECOND_CHAN_NONE;
         reported_primary = 0;
         reported_offset = 127;
         esp_err_t set_result = esp_wifi_set_channel(requested, wanted);
         bool readback = esp_wifi_get_channel(&reported_primary, &actual) == ESP_OK;
         if (readback) {
             reported_offset = actual == WIFI_SECOND_CHAN_ABOVE ? 1 :
-                              actual == WIFI_SECOND_CHAN_BELOW ? -1 : 0;
+                              actual == WIFI_SECOND_CHAN_BELOW ? -1 :
+                              actual == WIFI_SECOND_CHAN_NONE ? 0 : 127;
             channel = reported_primary;
         }
         tuned = set_result == ESP_OK && readback && reported_primary == requested && actual == wanted;
