@@ -1,0 +1,8 @@
+stage,name,start_time,end_time,duration_s,frames,first_frame,last_frame,ended,wireshark_filter
+1,cam_live_still,2026-11-21 21:10:19.716,2026-11-21 21:11:19.716,60.0,12382,1,12382,complete,frame.number >= 1 && frame.number <= 12382
+2,cam_live_motion,2026-11-21 21:11:22.612,2026-11-21 21:12:22.612,60.0,11485,12383,23867,complete,frame.number >= 12383 && frame.number <= 23867
+3,cam_idle,2026-11-21 21:12:27.242,2026-11-21 21:13:27.242,60.0,832,23868,24699,complete,frame.number >= 23868 && frame.number <= 24699
+4,cam_idle_laptop_youtube,2026-11-21 21:14:31.358,2026-11-21 21:15:31.358,60.0,37850,24700,62549,complete,frame.number >= 24700 && frame.number <= 62549
+5,cam_idle_laptop_download,2026-11-21 21:15:41.546,2026-11-21 21:16:41.546,60.0,104983,62550,167532,complete,frame.number >= 62550 && frame.number <= 167532
+6,cam_idle_laptop_videocall,2026-11-21 21:19:16.353,2026-11-21 21:20:16.353,60.0,117023,167533,284555,complete,frame.number >= 167533 && frame.number <= 284555
+7,cam_live_laptop_youtube,2026-11-21 21:20:46.451,2026-11-21 21:21:46.451,60.0,37669,284556,322224,complete,frame.number >= 284556 && frame.number <= 322224
