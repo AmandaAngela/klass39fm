@@ -149,17 +149,19 @@ static void command(const char *line)
         finish();
         return;
     }
-    bool above = strncmp(line, "WIDE+ ", 6) == 0;
-    bool below = strncmp(line, "WIDE- ", 6) == 0;
-    if (!above && !below && strncmp(line, "START", 5) != 0) return;
-    if (sscanf(line + 5, "%8lx %d %2hhx%2hhx%2hhx%2hhx%2hhx%2hhx %c",
+    bool target_only = line[0] == 'T';
+    const char *request = target_only ? line + 1 : line;
+    bool above = strncmp(request, "WIDE+ ", 6) == 0;
+    bool below = strncmp(request, "WIDE- ", 6) == 0;
+    if (!above && !below && strncmp(request, "START", 5) != 0) return;
+    if (sscanf(request + 5, "%8lx %d %2hhx%2hhx%2hhx%2hhx%2hhx%2hhx %c",
                &id, &requested, &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5],
                &extra) != 8 || !id || requested < -1 || requested > CHANNELS) return;
     if ((above || below) && (requested < 1 || (above && requested > CHANNELS - 4)
             || (below && requested < 5))) return;
     if (id == token) return; // repeated command cannot reset a live session
     if (token) finish(); // allow a fresh recorder after a host disconnect
-    capture_configure(mac);
+    capture_configure(mac, target_only);
     token = id;
     serial_no = sent = tx_errors = tx_lost = tune_errors = 0;
     mode = requested;

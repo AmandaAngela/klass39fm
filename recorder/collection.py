@@ -241,6 +241,7 @@ def append_manifest(root, row):
 
 def check_capture(folder, profile, require_identity=True):
     meta = json.loads((folder/'session.json').read_text())
+    capture_quality = meta.get('quality_findings', {})
     try:
         checks = inspect_traffic(folder, profile['mac'], profile['receiver'],
                                  profile.get('min_data_frames', DEFAULT_MIN_FRAMES),
@@ -254,6 +255,7 @@ def check_capture(folder, profile, require_identity=True):
     except (ValueError, OSError, KeyError) as exc:
         checks['findings'].append('replay_failed: '+str(exc))
     checks['findings'] = list(dict.fromkeys(checks['findings']))
+    checks['capture_quality_findings'] = capture_quality
     if not require_identity:
         checks['findings'] = [f for f in checks['findings'] if f != 'identity_unconfirmed']
         checks['identity_status'] = 'supported' if profile['identity_confirmed'] else 'provisional'
@@ -292,6 +294,9 @@ def preflight(args, run, profile):
             findings.append('traffic_review_required: '+item['folder'])
         print(f"{item['secondary']} / ch{item['primary']}: {check.get('target_tx_data_frames', 0)} outgoing data frames; "
               f"{check.get('target_tx_data_frames_per_s', 0):.2f}/s; findings={check['findings'] or 'none'}")
+        quality = check.get('capture_quality_findings', {})
+        if quality:
+            print('  Receiver capture loss/errors: ' + ', '.join(f'{key}={value}' for key, value in quality.items()))
         print(f"Fields observed in target transmissions: {sum(bool(n) for n in check.get('field_nonempty_target_rows', {}).values())}/47. "
               'See traffic_check.json for conditional blanks and missing applicable fields.')
     result = dict(passed=not findings, findings=findings, sessions=checks,
@@ -358,6 +363,7 @@ def organise(root, survey_root, profile, run_id):
             # Update the inventory immediately so a later reporting failure cannot orphan data.
             save(report_path, report)
         context = dict(setup=profile['setup'], identity_basis=profile['identity_basis'],
+                       capture_scope=profile.get('capture_scope', 'all'),
                        review=f"Collection status: {state}. Findings: {reasons or 'none'}. See traffic_check.json for field availability and screening thresholds. This is an acquisition check, not proof of model suitability." + (' '+REVIEW_MESSAGE if reasons else ''),
                        additional_findings=f"Physical device alias: {profile['device']}. Activity: {profile['activity']}. Experiment: {run_id}. Keep its widths and repeat windows in the same evaluation partition.",
                        recording_output_root=str(root / 'runs'))
@@ -365,18 +371,20 @@ def organise(root, survey_root, profile, run_id):
         if reasons:
             print(REVIEW_MESSAGE)
             print(f'Review-only capture (not promoted): {dest}; findings: {reasons}')
+        schema_csv = 'camera_packets.csv' if meta.get('capture_scope') == 'target' else 'all_wifi_packets.csv'
         row = dict(session_id=f"{meta['token']:08x}", run_id=run_id,
                    session_folder=str(dest), target_packets_csv=str(dest/'camera_packets.csv'),
                    device_class=profile['device_class'], activity=profile['activity'],
                    sample_label=sample_label,
                    collection_folder=str(batch), training_eligible=not bool(reasons),
+                   capture_scope=meta.get('capture_scope', 'all'),
                    identity_status=profile.get('identity_status', 'confirmed' if profile['identity_confirmed'] else 'provisional'),
                    traffic_check_json=str(dest/'traffic_check.json'),
                    physical_device_alias=profile['device'], target_mac=meta['camera_mac'],
                    primary=meta['requested_mode'], receiver_width_mhz=width, secondary=secondary,
                    measured_seconds=metrics.get('measured_seconds', ''), status=state,
                    quality_findings=json.dumps(reasons),
-                   schema_columns=len(next(csv.reader((dest/'all_wifi_packets.csv').read_text().splitlines()))),
+                   schema_columns=len(next(csv.reader((dest/schema_csv).read_text().splitlines()))),
                    receiver_target=(meta.get('latest_firmware_status') or {}).get('target',''),
                    firmware_sha256=(meta.get('latest_firmware_status') or {}).get('firmware_sha256',''),
                    raw_sha256=hashlib.sha256((dest/'raw_serial.bin').read_bytes()).hexdigest())
@@ -403,6 +411,7 @@ def main(repo):
     parser.add_argument('--preflight-seconds', type=positive, default=10, help='Traffic check seconds per fixed receiver setting')
     parser.add_argument('--min-data-frames', type=positive, default=DEFAULT_MIN_FRAMES, help='Minimum outgoing payload-carrying frames per checked session')
     parser.add_argument('--min-data-rate', type=positive, default=DEFAULT_MIN_RATE, help='Minimum outgoing payload-carrying frames/s (screening heuristic)')
+    parser.add_argument('--capture-scope', choices=('target','all'), help='target MAC only (default) or all decoded channel traffic')
     opts = parser.parse_args()
     os.chdir(repo)
     ports = list(list_ports.comports())
@@ -427,7 +436,7 @@ def main(repo):
     args = SimpleNamespace(port=port, baud=921600, state='unknown', camera=None,
                            output=str(run), channel=0, secondary='auto', probe_seconds=opts.probe_seconds,
                            duration=opts.preflight_seconds, labels=None, notes='Unlabelled traffic/field availability check before dataset collection.',
-                           expected_target='esp32'+profile['receiver'])
+                           expected_target='esp32'+profile['receiver'], capture_scope='all')
     print('This workflow uses 2.4 GHz and automatically surveys 20/40 MHz settings.')
     current = ask('Current MAC (or find for guided power-off/on discovery)', profile.get('mac','find'))
     save(run/'profile.json', profile)
@@ -443,7 +452,7 @@ def main(repo):
             profile.update(identity_confirmed=selection['identity_confirmed'], identity_status=selection['identity_status'])
         else:
             mac = camera_mac(current)
-            source = choice('Where did this MAC come from?', ('device-settings','verified-power-test','traffic-guess'), 'traffic-guess')
+            source = choice('Where did this MAC come from?', ('device-settings','verified-power-test','traffic-guess'), 'device-settings')
             if source == 'traffic-guess':
                 save(run/'result.json', dict(result='identity_unresolved', candidate_mac=mac,
                      reason='Address selected by traffic volume only; no identity confirmation.'))
@@ -452,7 +461,7 @@ def main(repo):
                 return 2
             basis = ('Operator checked the current MAC in device/router settings.' if source=='device-settings' else
                      'Operator reports a separately verified controlled power test.')
-            profile.update(identity_confirmed=choice('Confirm current MAC belongs to this device', ('yes','no'),'no')=='yes',
+            profile.update(identity_confirmed=choice('Confirm current MAC belongs to this device', ('yes','no'),'yes')=='yes',
                            identity_status='operator_confirmed')
             if not profile['identity_confirmed']:
                 save(run/'result.json', dict(result='identity_unconfirmed'))
@@ -460,7 +469,12 @@ def main(repo):
                 return 2
         profile.update(mac=mac, identity_basis=basis)
         args.camera = mac
-        if choice('Run the intended device activity for the traffic check. Ready?', ('yes','cancel'),'cancel')!='yes':
+        profile['capture_scope'] = opts.capture_scope or choice(
+            'Capture scope', ('target','all'), profile.get('capture_scope','target'))
+        args.capture_scope = profile['capture_scope']
+        print('Target scope queues only frames addressed to or sent by this MAC. All scope keeps every decoded channel observation.')
+        save(run/'profile.json', profile)
+        if choice('Run the intended device activity for the traffic check. Ready?', ('yes','cancel'),'yes')!='yes':
             save(run/'result.json', dict(result='cancelled_before_capture'))
             return 1
         if not preflight(args, run, profile):
@@ -476,7 +490,7 @@ def main(repo):
         profile['duration'] = opts.seconds or positive(ask('Seconds per full receiver setting', str(profile.get('duration',90))))
         print('Setup can be unknown. Record connected band, AP/topology, distance, obstacles and workload settings.')
         profile['setup'] = ask('Experiment setup', profile.get('setup','Unknown; not supplied by operator.'))
-        if choice('Keep the stated activity stable for the full 20/40 MHz recordings. Ready?', ('yes','cancel'),'cancel')!='yes':
+        if choice('Keep the stated activity stable for the full 20/40 MHz recordings. Ready?', ('yes','cancel'),'yes')!='yes':
             save(run/'result.json', dict(result='cancelled_after_preflight'))
             return 1
         save(run/'profile.json', profile)

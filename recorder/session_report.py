@@ -24,9 +24,11 @@ def write_session_readme(folder, context=None):
     meta = json.loads((folder / "session.json").read_text(encoding="utf-8-sig"))
     status = meta.get("latest_firmware_status") or {}
     target = meta.get("camera_mac")
+    capture_scope = meta.get("capture_scope", "all")
+    csv_name = "camera_packets.csv" if capture_scope == "target" else "all_wifi_packets.csv"
     types, modes, widths = Counter(), Counter(), Counter()
     total = tx = rx = data_tx = data_rx = data_bytes = retries = 0
-    with (folder / "all_wifi_packets.csv").open(newline="", encoding="utf-8-sig") as stream:
+    with (folder / csv_name).open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
         columns = reader.fieldnames or []
         for row in reader:
@@ -71,6 +73,7 @@ def write_session_readme(folder, context=None):
     command = ["python $rec", "--port " + ps_quote(meta.get("port", "PORT")),
                "--baud " + str(meta.get("baud", 921600)),
                "--state " + ps_quote(meta.get("camera_state", "unknown"))]
+    command.append("--capture-scope " + meta.get("capture_scope", "all"))
     if target:
         command.append("--camera " + ps_quote(target))
     if discovery:
@@ -107,11 +110,17 @@ def write_session_readme(folder, context=None):
         suggestions.append(f'{retries} outgoing data frames carry retry flags. Compare retry-inclusive and documented retry-aware features in derived copies; retain raw retries.')
     if width == 40 and not widths.get('1'):
         suggestions.append('This 40 MHz receiver run decoded no target outgoing data marked 40 MHz. Do not relabel its frames as wide just because of the receiver setting.')
-    if total > tx:
-        suggestions.append('Other transmitters contribute to the channel CSV. Build target-originated features using addr2_ta; do not assign the target class to every channel row.')
+    if total > tx and meta.get('capture_scope', 'all') == 'all':
+        suggestions.append('Other transmitters contribute to this all-channel CSV. Build target-originated features using addr2_ta; do not assign the target class to every channel row.')
+    elif total > tx and meta.get('capture_scope') == 'target':
+        suggestions.append('This target-scoped CSV includes replies from other transmitters addressed to the target. Use addr2_ta to isolate target-originated features.')
     if len(columns) != 47:
         suggestions.append(f'This archive has {len(columns)} columns. Select a shared named feature set and record unavailable fields when combining schemas.')
     stage2 = '\n'.join('- ' + s for s in suggestions) or '- No specific acquisition warning was identified by these checks; inspect coverage and setup before selecting features.'
+    csv_files = ('| `camera_packets.csv` | All decoded observations in target scope; every stored frame addresses or was sent by the selected MAC. |'
+                 if capture_scope == 'target' else
+                 '| `all_wifi_packets.csv` | All decoded observations on the receiver channel. |\n'
+                 '| `camera_packets.csv` | Rows whose immediate receiver or transmitter is the selected MAC. |')
     text = f"""# Recording {meta.get('token', 0):08x}: {meta.get('camera_state', 'unknown')}
 
 ## 1. Summary of this recording
@@ -124,8 +133,7 @@ Saved Stage 1 Wi-Fi observations for this session only. Result: **{meta.get('res
 
 | File in this folder | Meaning |
 | --- | --- |
-| `all_wifi_packets.csv` | All decoded channel observations, including other devices. |
-| `camera_packets.csv` | Immediate receiver/transmitter target matches; historical filename for any device class. |
+{csv_files}
 | `raw_serial.bin` | Exact exported serial measurement stream for replay; not full Wi-Fi frame bodies. |
 | `status.jsonl` | BEGIN/status/END, tuning/lock, counters and firmware identity. |
 | `session.json` | Settings, notes, labels, corrections and acquisition outcome. |
@@ -152,11 +160,11 @@ Discovery provenance: `{json.dumps(discovery) if discovery else 'Not recorded as
 
 {setup}
 
-Receiver request: channel/mode `{mode}`, width **{width} MHz**, secondary `{secondary}`. Final channel `{status.get('channel', 'unknown')}`, lock `{status.get('locked', 'unknown')}`, driver primary `{status.get('reported_primary', 'not exported for this mode')}`, secondary `{status.get('reported_secondary', 'not exported for this mode')}`. These are receiver settings; actual decoded width is a separate per-frame field. Requested duration: {meta.get('requested_seconds', 'unspecified')} s; measured BEGIN-to-END duration: **{measured}**.
+Capture scope: **{meta.get('capture_scope', 'all')}**. In target scope, firmware queues only frames where the selected MAC is the immediate receiver or transmitter; all scope preserves all decoded channel observations. Host transport: `{meta.get('transport_interface', 'unknown')}`. Receiver request: channel/mode `{mode}`, width **{width} MHz**, secondary `{secondary}`. Final channel `{status.get('channel', 'unknown')}`, lock `{status.get('locked', 'unknown')}`, driver primary `{status.get('reported_primary', 'not exported for this mode')}`, secondary `{status.get('reported_secondary', 'not exported for this mode')}`. These are receiver settings; actual decoded width is a separate per-frame field. Requested duration: {meta.get('requested_seconds', 'unspecified')} s; measured BEGIN-to-END duration: **{measured}**.
 
 | Observed measurement | Value |
 | --- | ---: |
-| All decoded channel observations | {total} |
+| Decoded observations in selected scope | {total} |
 | Management / data / control observations | {types['0']} / {types['2']} / {types['1']} |
 | Target-address matches (host counter) | {meta.get('host', {}).get('camera_rows', 0)} |
 | Target outgoing / incoming data frames | {data_tx} / {data_rx} |

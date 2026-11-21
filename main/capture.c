@@ -8,10 +8,11 @@ static size_t head, used;
 static bool active;
 static uint8_t camera[6];
 static bool has_target;
+static bool target_only;
 static uint8_t detected;
 static capture_stats_t counts;
 
-void capture_configure(const uint8_t target[6])
+void capture_configure(const uint8_t target[6], bool filter_target)
 {
     portENTER_CRITICAL(&lock);
     active = false;
@@ -20,6 +21,7 @@ void capture_configure(const uint8_t target[6])
     memcpy(camera, target, 6);
     const uint8_t empty[6] = {0};
     has_target = memcmp(target, empty, sizeof(empty)) != 0;
+    target_only = filter_target && has_target;
     portEXIT_CRITICAL(&lock);
 }
 
@@ -150,6 +152,10 @@ void capture_callback(void *buffer, wifi_promiscuous_pkt_type_t kind)
         case UNSUPPORTED: counts.unsupported++; break;
         case RX_ERROR: counts.rx_errors++; break;
         case VALID:
+            // Target-only sessions preserve the same endpoint matches as the
+            // host's target CSV, while avoiding unrelated rows in the ring.
+            if (target_only && memcmp(r.addr[0], camera, 6) != 0 &&
+                memcmp(r.addr[1], camera, 6) != 0) break;
             r.id = ++counts.eligible; // assign before overflow so gaps remain visible
             if (used == CAPACITY) {
                 counts.overflow++;

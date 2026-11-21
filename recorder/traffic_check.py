@@ -1,5 +1,6 @@
 """Conservative acquisition screening, not a classifier or RF completeness test."""
 import csv
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -21,7 +22,10 @@ def inspect_traffic(folder, mac, receiver, min_frames=DEFAULT_MIN_FRAMES, min_ra
     populated = Counter({key: 0 for key in FIELDS})
     missing_required = Counter()
     tx = data = 0
-    with (folder/'all_wifi_packets.csv').open(newline='', encoding='utf-8-sig') as stream:
+    meta_path = folder/'session.json'
+    meta = json.loads(meta_path.read_text(encoding='utf-8-sig')) if meta_path.exists() else {}
+    csv_name = 'camera_packets.csv' if meta.get('capture_scope', 'all') == 'target' else 'all_wifi_packets.csv'
+    with (folder/csv_name).open(newline='', encoding='utf-8-sig') as stream:
         reader = csv.DictReader(stream)
         columns = reader.fieldnames or []
         for row in reader:

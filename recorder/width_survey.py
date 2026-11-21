@@ -2,6 +2,7 @@
 import csv
 import json
 import secrets
+import time
 from copy import copy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,7 +65,15 @@ def survey(args, record):
     def save():
         temp = root / "survey.tmp"
         temp.write_text(json.dumps(report, indent=2) + "\n", encoding="utf8")
-        temp.replace(root / "survey.json")
+        # Windows indexers/readers can briefly hold the destination open.
+        for attempt in range(20):
+            try:
+                temp.replace(root / "survey.json")
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
 
     def capture(phase, primary, secondary, seconds):
         run = copy(args)

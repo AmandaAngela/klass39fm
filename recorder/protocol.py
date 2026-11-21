@@ -16,6 +16,7 @@ LAYOUTS = {2: PACKET_V2, 3: PACKET_V3, 4: PACKET_V3, 5: PACKET_V5, 6: PACKET_V5}
 STATUS = struct.Struct("<10IQbBB32s32s16s")
 RADIO = struct.Struct("<Bb")
 CRC = struct.Struct("<I")
+BATCH_SIZE = 32
 COUNTERS = ("eligible", "overflow", "malformed", "unsupported", "rx_errors", "high_water",
             "sent", "tx_errors", "tx_lost", "tune_errors")
 BASE_FIELDS = ("host_utc", "wire_seq", "observation_id", "esp_timestamp_us", "channel", "rssi_dbm",
@@ -67,7 +68,7 @@ class Decoder:
             _, version, kind, n, token, seq = HEADER.unpack_from(self.buf)
             layout = LAYOUTS.get(version)
             good_size = layout is not None and (
-                kind == b"P" and 0 < n <= 32 * layout.size and n % layout.size == 0
+                kind == b"P" and 0 < n <= BATCH_SIZE * layout.size and n % layout.size == 0
                 or kind in (b"B", b"S", b"E") and n == STATUS.size + (RADIO.size if version in (4, 6) else 0))
             if not good_size:
                 self.errors["bad_headers"] += 1
@@ -111,7 +112,7 @@ def layout_for(payload):
     Record sizes 41, 45 and 61 have no common valid batch length at 1..32 records.
     """
     options = [s for s in (PACKET_V2, PACKET_V3, PACKET_V5)
-               if payload and len(payload) % s.size == 0 and len(payload) <= 32 * s.size]
+               if payload and len(payload) % s.size == 0 and len(payload) <= BATCH_SIZE * s.size]
     if len(options) != 1:
         raise ValueError(f"packet body of {len(payload)} bytes matches no single record layout")
     return options[0]

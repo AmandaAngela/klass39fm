@@ -40,9 +40,10 @@ def is_group(mac):
 
 def load(folder):
     folder = Path(folder)
-    with (folder / "all_wifi_packets.csv").open(newline="") as f:
-        rows = list(csv.DictReader(f))
     meta = json.loads((folder / "session.json").read_text(encoding="utf8"))
+    csv_name = "camera_packets.csv" if meta.get("capture_scope", "all") == "target" else "all_wifi_packets.csv"
+    with (folder / csv_name).open(newline="") as f:
+        rows = list(csv.DictReader(f))
     return rows, meta
 
 

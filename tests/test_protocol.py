@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "recorder"))
 from audit_recording import audit
 from protocol import (CRC, Decoder, FIELDS, HEADER, MAGIC, PACKET, PACKET_V3, PACKET_V5,
                       PHY_FIELDS, STATUS, rows, layout_for)
-from record_wifi import Session, record, load_labels
+from record_wifi import Session, record, load_labels, transport_interface
 from device_features import burst_windows, measured_seconds, features
 from width_survey import settings, survey
 
@@ -38,6 +38,13 @@ def packet_v3(ident, fc, phy=0, mcs=0, rate=11, noise=-96):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_native_usb_serial_jtag_interface_is_detected(self):
+        usb = SimpleNamespace(device="USB_RECEIVER", vid=0x303A, pid=0x1001)
+        bridge = SimpleNamespace(device="SERIAL_BRIDGE", vid=0x1A86, pid=0x55D3)
+        with patch("record_wifi.list_ports.comports", return_value=[usb, bridge]):
+            self.assertEqual(transport_interface("USB_RECEIVER"), "usb_serial_jtag")
+            self.assertEqual(transport_interface("SERIAL_BRIDGE"), "serial_bridge_or_unknown")
+
     def test_c5_signal_formats_and_all_batch_sizes(self):
         ht = 7 | (1 << 7) | (1 << 27) | (1 << 28) | (1 << 30) | (1 << 31)
         he = (9 << 3) | (1 << 7) | (23 << 8) | (1 << 19) | (2 << 21) | (1 << 2)
@@ -163,9 +170,37 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(report["result"], "target_not_observed")
             self.assertEqual(len(report["runs"]), 31)
 
+    def test_width_survey_retries_transient_windows_file_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(output=tmp, camera="02:00:00:00:00:01", channel=1,
+                                   duration=0.1, probe_seconds=0.1)
+            def empty(args, *, folder):
+                folder.mkdir()
+                (folder / "session.json").write_text('{"result":"completed","quality_findings":{"empty_capture":true}}')
+                (folder / "status.jsonl").write_text('{"kind":"B","uptime_us":0}\n{"kind":"E","uptime_us":1000000}\n')
+                (folder / "camera_packets.csv").write_text(",".join(FIELDS) + "\n")
+                return 2
+            original = Path.replace
+            attempts = []
+            def transient(source, target):
+                if source.name == "survey.tmp":
+                    attempts.append(source)
+                    if len(attempts) <= 2:
+                        raise PermissionError("destination temporarily held by indexer")
+                return original(source, target)
+            with patch.object(Path, "replace", transient), patch("width_survey.time.sleep"):
+                self.assertEqual(survey(args, empty), 2)
+            self.assertGreaterEqual(len(attempts), 3)
+            survey_root, = Path(tmp).iterdir()
+            report = json.loads((survey_root / "survey.json").read_text())
+            self.assertEqual(report["result"], "target_not_observed")
+            self.assertEqual(len(report["runs"]), 2)
+
     def test_default_and_ht40_session_commands_and_audit(self):
-        for secondary, version, verb in ((None, 3, "START"), ("above", 4, "WIDE+"),
-                                          ("below", 4, "WIDE-")):
+        for secondary, version, verb, scope in (
+                (None, 3, "START", "all"), ("above", 4, "WIDE+", "all"),
+                ("below", 4, "WIDE-", "all"), (None, 3, "TSTART", "target"),
+                ("above", 4, "TWIDE+", "target")):
             with self.subTest(secondary=secondary), tempfile.TemporaryDirectory() as tmp, \
                     patch("record_wifi.serial.Serial") as factory, \
                     patch("record_wifi.secrets.randbelow", return_value=122):
@@ -180,20 +215,24 @@ class ProtocolTests(unittest.TestCase):
                                          wire(b"P", 1, packet_v3(1, 8), version),
                                          wire(b"E", 2, status(1000100, 1), version)]
                 link.in_waiting = 500
+                camera = "02:02:02:02:02:02" if scope == "target" else None
                 args = SimpleNamespace(output=tmp, state="unknown", channel=6, port="test",
-                    baud=115200, camera=None, duration=0.1, notes="", secondary=secondary)
+                    baud=115200, camera=camera, duration=0.1, notes="", secondary=secondary,
+                    capture_scope=scope)
                 with patch("record_wifi.time.monotonic", side_effect=[0, 0.1, 0.5, 1.1]):
                     self.assertEqual(record(args), 0)
+                wire_target = camera.replace(":", "") if camera else "000000000000"
                 self.assertEqual(link.write.call_args_list[0].args,
-                                 (f"\n{verb} 0000007b 6 000000000000\n".encode(),))
+                                 (f"\n{verb} 0000007b 6 {wire_target}\n".encode(),))
                 folder, = Path(tmp).iterdir()
                 self.assertEqual(audit(folder)["rows"], 1)
                 report = (folder / "README.md").read_text()
                 self.assertIn("## 5. Suggestions/recommendations for Stage 2", report)
-                self.assertIn("| All decoded channel observations | 1 |", report)
+                self.assertIn("| Decoded observations in selected scope | 1 |", report)
                 self.assertIn("Passed: raw measurements", report)
                 info = json.loads((folder / "session.json").read_text())
                 self.assertEqual(info["latest_firmware_status"].get("reported_secondary"), secondary)
+                self.assertEqual(info["capture_scope"], scope)
                 self.assertEqual(measured_seconds(folder), 1)
 
     def test_device_label_intervals(self):

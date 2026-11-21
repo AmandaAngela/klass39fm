@@ -30,7 +30,7 @@ typedef struct {
     uint32_t eligible, overflow, malformed, unsupported, rx_errors, high_water;
 } capture_stats_t;
 void capture_callback(void *buffer, wifi_promiscuous_pkt_type_t kind);
-void capture_configure(const uint8_t target[6]);
+void capture_configure(const uint8_t target[6], bool target_only);
 void capture_enable(bool enabled);
 uint8_t capture_detected_channel(void);
 size_t capture_take(observation_t *dest, size_t limit);
