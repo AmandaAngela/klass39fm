@@ -1,157 +1,151 @@
-# Portable Wi-Fi camera research recorder
+# Passive Wi-Fi research recorder
 
-This prototype records passive 802.11 management, data and control frame metadata visible to one receiver. It can discover active transmitters, follow a known test transmitter, or listen on a fixed channel. It requires no router credentials. Camera state is an operator-supplied experiment label. Other traffic, including uploads and video calls, can resemble a camera stream.
+Collect reproducible Stage 1 measurements with an ESP32-C5 or ESP32-S3. Run one interactive script; it asks for the experiment details and capture scope, searches the supported 2.4 GHz settings, records 20 MHz and legal 40 MHz comparisons sequentially, checks the data and writes an explanation **inside every recording folder**. Device classes come from the operator. This repository does not classify cameras from traffic.
 
-## Build and flash
+## Start collecting
 
-Open an ESP-IDF v6.1 PowerShell environment in the project root. In a fresh checkout select the ESP32-S3 target before building. Existing configured workspaces can start at the build step.
+For a new machine, you need Git, Python 3.10 or newer, an ESP32-C5 or ESP32-S3, and a USB data cable. This is a hardware recorder: cloning the repository does not make a blank ESP ready to capture.
 
-```powershell
-idf.py set-target esp32s3
-idf.py build
-python -m serial.tools.list_ports -v
-$port = Read-Host "Receiver serial port"
-python -m esptool --port $port chip-id
-idf.py -p $port flash
-```
+1. Clone the source using the commands below.
+2. For a new/unflashed ESP, or when updating to target/all capture-scope support, install ESP-IDF v6.1 and follow [build/flash instructions](docs/firmware.md) using the correct chip target. The firmware accepts one active session at a time; the script runs its channel/width comparisons sequentially.
+3. Connect the receiver, close other serial monitors, install the Python dependency and run the collector. Install the board's USB-serial driver if its port does not appear. No API key, AI service, existing profile or dataset is required.
 
-Confirm the board and port before flashing. Close IDF Monitor or any other process holding the receiver port. The tested interface uses native USB Serial/JTAG (Espressif VID 303A, PID 1001). Connect the board's native USB connector. A separate USB-to-UART bridge on this board carries console output. USB line baud is nominal. The fallback on targets without Serial/JTAG uses UART0 at 921600 baud and requires validation on the target. The firmware uses the MY country plan (channels 1–13). Verify the local channel plan before moving the receiver.
-
-## Record an experiment
-
-From the project root in the activated shell:
+Windows PowerShell (run from wherever you want the checkout):
 
 ```powershell
-$rec = 'esp32_camera_recorder/esp32_camera_recorder/record_wifi.py'
-python $rec --port $port --state unknown --channel scan --duration 20
-$camera = Read-Host "Test-device MAC address"
-$channel = Read-Host "Test-device channel"
-python $rec --port $port --camera $camera --state idle --channel auto --duration 60
-python $rec --port $port --camera $camera --state streaming --channel $channel --duration 60
-python $rec --port $port --camera $camera --state off --channel $channel --duration 60
-python $rec --port $port --camera $camera --state motion-triggered --channel $channel
+git clone https://github.com/AmandaAngela/klass39fm.git
+cd klass39fm
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe collect.py --check
+.\.venv\Scripts\python.exe collect.py
 ```
 
-- `scan` cycles channels every 500 ms. `auto` requires a test MAC and locks when address 2 matches it. Without a channel argument, supplying a MAC selects automatic locking and omitting the MAC selects scanning. Untargeted recordings contain all decoded observations and a header-only camera CSV. Channel transitions and lock status appear in `status.jsonl`.
-- A channel number locks immediately, including when the target is off. Use a fixed channel for comparable time series. Each START applies a fresh mode and camera address. The state choices also include `background`, `unknown` and `motion`.
-- Omit `--duration` to record until Ctrl+C. On a normal stop the host requests STOP and waits for the receiver to drain its ring and send its final counters. Abrupt process termination can leave a partial session. Each run creates an exclusive UTC-timestamped directory with a random session token.
-- In `--notes` record a device or model alias, ground-truth basis, environment, distance, obstructions, network setup, receiver placement, stream settings and any state changes. Keep mixed or uncertain states labelled accordingly. The receiver can listen without joining the network.
+An existing Python environment with pyserial also works: `python collect.py`.
+The ESP must already have the matching firmware; see [building and troubleshooting](docs/firmware.md). ESP-IDF is needed to build firmware, not for daily recording. Close other serial monitors.
 
-## Session files and measurements
+On Linux/macOS, create the environment with `python3 -m venv .venv`, then use `.venv/bin/python` in place of `.\.venv\Scripts\python.exe`. The host software uses pyserial; serial drivers/device permissions must be configured for that OS. Windows is the hardware-tested setup. WSL additionally requires USB passthrough and is not the simplest Windows route. A virtual environment must be created locally; do not copy or commit someone else's `.venv`.
 
-| File | Contents |
+`collect.py --help` checks that the CLI can load without a receiver. `--check` enumerates/selects a port; it does not test radio reception or flash firmware. The first traffic preflight checks the firmware target and actual observations. Current firmware operates on **2.4 GHz only**.
+
+The script asks for the receiver type and current MAC (or guided discovery). It automatically selects the single USB serial connection, ignoring Bluetooth ports. A saved profile can recognise the same USB adapter after its port changes. If several possible receivers are connected, unplug extras or use --port; it does not guess. USB bridge names do not prove chip identity, so firmware verification still checks the selected receiver. On C5, native USB Serial/JTAG commonly appears as Espressif VID/PID `303A:1001`; the recorder keeps DTR asserted on this interface and low on UART bridges. After resolving the MAC, choose **target** to queue only frames addressed to or sent by that MAC, or **all** to retain all decoded channel traffic. Target scope is the default and reduces unrelated traffic before it reaches the firmware queue. The script then runs an **unlabelled traffic check before asking for the dataset class/name**. Start the intended workload for that check. It automatically surveys both widths and records ten seconds at 20 MHz and each legal 40 MHz setting on the selected primary.
+
+Each setting must pass raw replay, receiver/quality checks, the 47-column schema check and applicable-field checks. Default minimum traffic is **20 outgoing payload-carrying data frames and 1 such frame/second**, measured over the fixed capture. Frames only addressed to the target, probes, ACKs and data-null frames do not satisfy this requirement. These are conservative screening thresholds, not a validated detector of incomplete traffic or 2x2 transmissions.
+
+If any setting fails, the script prints **CHECK WITH AI**, saves the diagnostic evidence under runs/, and stops before the full dataset recording. When the ESP reports capture loss, the console and traffic_check.json show the firmware counters (such as queue overflow and observation gaps) so it is clear whether the problem is missing target traffic or receiver acquisition. Share that run's traffic_check.json and reports for review. Confirmed idle/low-rate devices may legitimately fail this gate; their data is preserved for review rather than called useless. For a justified experiment, thresholds can be supplied explicitly with --min-data-frames and --min-data-rate, check duration with --preflight-seconds and scope with --capture-scope target|all. The actual scope and thresholds are saved in profiles and reports.
+
+On Windows a file indexer can briefly hold `survey.json` open. The survey retries a transient replacement failure; a persistent file-access error still ends the run and preserves completed probes. If a busy setting reports `overflow`, its decoded rows are useful diagnostic evidence but that setting needs a fresh, loss-free capture before training use.
+
+After passing, the script asks **camera or non-camera**, then **device name/model**, activity, duration and setup. Camera maps to positive; non-camera maps to negative. This mapping comes from operator-confirmed identity, not traffic shape. Include connected band, topology, receiver placement/distance and workload settings in setup; unknown details remain unknown. An idle camera remains positive.
+
+Not every one of the 47 fields applies to every PHY/frame/receiver. For example, HE fields are blank on legacy traffic, and S3 has no C5 extensions. The check reports populated counts for all 47 columns and requires fields applicable to the observed data. It cannot promise all 47 values or complete radio coverage.
+
+Enter a known active MAC and state its source (device/router settings or a separately verified power test), or enter `find`. For a manually supplied MAC, the defaults are device/router settings, confirmation that the MAC belongs to the device, and readiness to start the check and full recording. Change the answer if any default is not true. A traffic-volume guess is not accepted as confirmed identity. `find` guides three steps: turn the device on and start its activity; unplug only that device while leaving the ESP/router/other devices running; power it on and restart the same activity. Each default scan takes roughly a minute.
+
+After the three steps, find **automatically selects a candidate; there is no MAC-selection or identity-confirmation question**. It considers non-beacon transmitters absent during OFF with at least 20 data frames after restart. It ranks same-address ON/OFF/ON matches first, then outgoing data counts after/before restart, using address order only to break exact ties. This is a reproducible heuristic, not a probability or camera classifier.
+
+A unique same-address match with at least 20 data frames in both ON scans receives power_test_supported identity status. A changed-address or competing-candidate selection is provisional. Both can proceed through traffic preflight and recording; provisional collections stay together under runs/<run_id>/review/ and are not eligible as confirmed training samples. If no candidate has enough data, find stops with evidence for review. You still perform the physical power changes and confirm readiness for each scan. No identity is inferred from MAC prefix or traffic shape.
+
+Keep the workload stable through the check and full capture. Full collection starts a fresh automatic survey of both widths, then records fixed comparisons. Each full recording must pass the same traffic checks before it enters dataset/. If traffic stops after preflight, the affected recording stays in runs/ for review. A 90-second setting gives two or three comparisons plus preflight and discovery time. Default probe dwell is two seconds; use `--probe-seconds 5` for a quiet target. No transmission means automatic discovery cannot lock a fully powered-off target; use a documented fixed-channel diagnostic baseline instead.
+
+Profiles are saved privately. Repeat with:
+```powershell
+python collect.py --profile profiles/<device_alias>.json --seconds 90
+```
+Current MAC, identity and activity are reconfirmed. Exit 0 means acquisition checks passed; 1 means failure/interruption; 2 means no target, unresolved identity or findings needing review. Acquisition checks are not a declaration of model suitability.
+
+## Where everything goes
+
+```text
+collect.py                  Entry point for normal recording
+recorder/                   Python capture, discovery, audit and reporting
+main/                       ESP firmware
+tests/                      Synthetic protocol/workflow regression tests
+docs/                       Measurement definitions and firmware instructions
+profiles/                   Private reusable experiment inputs
+recordings/
+  c5/                       Current C5 collection (s3/ for new S3 work)
+    README.md               Local collection index
+    manifest.csv            Session labels, paths, hashes and acquisition status
+    dataset/
+      <device>_<UTCdate-time>_<activity>_<positive-or-negative>_<run-id>/
+        README.md           Collection summary and links to receiver tests
+        20mhz/              First receiver test, with its own files and README
+        40mhz_above/         When legal on the selected primary
+        40mhz_below/         When legal on the selected primary
+    runs/<run_id>/           Discovery evidence, run report and review attempts
+archive/                    Private historical experiments and migration index
+build/                      Ignored, regenerable firmware build outputs
+AGENTS.md                   Instructions for future AI assistants
+CAPSTONE_CONTEXT.md         Research objective and scope
+```
+
+Browse `recordings/c5/dataset/` for acquisition-checked collections. **One run creates one device/date/activity folder**, containing the separate 20 MHz and legal 40 MHz receiver tests. The two or three child folders are sequential observations of the same activity, not duplicated recordings. A primary near the band edge has only one legal 40 MHz position, giving two recordings; a middle primary can have both, giving three. The run ID avoids overwriting repeats.
+
+All comparisons stay together. If any full comparison has acquisition findings or identity is provisional, the entire collection uses the same layout under runs/<run_id>/review/ instead of dataset/. Its manifest entries have review_required and training_eligible=false. Each child has its own five-section README; the parent README explains the receiver settings. Historical collections retain their paths unless explicitly reorganised with verified path updates. Preflight is diagnostic, not a labelled dataset.
+
+There is no additional automatic finaliser copy. Future training selections should reference canonical sessions through a selection manifest and write derived features separately. Historical copies remain in the private archive, with original paths preserved inside its ZIP. Archives, profiles, capture outputs and machine-specific configuration are ignored by Git.
+
+## What each recording contains
+
+| File | Purpose |
 | --- | --- |
-| `raw_serial.bin` | Exact bytes returned by serial reads, including diagnostics, corrupt frames and partial tails. No payload capture or host timestamp insertion. |
-| `all_wifi_packets.csv` | Every decoded observation in valid WFS2 batches for this session, in delivery order. |
-| `camera_packets.csv` | Rows from the complete CSV with the known MAC as the immediate transmitter or receiver (addr2 or addr1). This includes both link directions and excludes broadcast beacons merely mentioning that network. |
-| `status.jsonl` | BEGIN, heartbeat/channel and END snapshots, with device uptime, tuned channel, lock, counters, build SHA, IDF and target. |
-| `session.json` | Settings, operator label and notes, UTC times, firmware and host counters, result and final reconciliation. Periodically checkpointed. |
+| README.md | This recording's summary, files/code, reproduction steps, setup/results and Stage 2 suggestions |
+| camera_packets.csv | Target-scope: all stored observations address or were sent by the selected MAC. All-scope: only rows whose immediate receiver/transmitter is the selected MAC. |
+| all_wifi_packets.csv | Created only in all-scope recordings; contains every decoded channel observation. |
+| raw_serial.bin | Exact exported measurement stream for replay; not full Wi-Fi frames |
+| status.jsonl | BEGIN/status/END, receiver tuning, counters and firmware identity |
+| session.json | Operator labels, capture settings and acquisition outcome |
+| recording_context.json | Setup and review explanation retained when regenerating the README |
+| traffic_check.json | All 47 columns' target availability, applicable-field failures, counts/rates and screening thresholds |
 
-`esp_timestamp_us` is the raw 32-bit Wi-Fi RX clock. It wraps after about 71.6 minutes. The recorder counts adjacent equal values and decreases and preserves both. `host_utc` is the host time the read completing a batch was processed. Several observations may share it. Neither time is a synthetic inter-arrival estimate. Sequence and retry flags provide context for repeated observations. Reordering, aggregation, retries, fragmentation and timestamp precision complicate interpretation.
+README statistics and suggestions are generated from the actual recording. Rule-based suggestions mention findings such as retries, missing data or no decoded wide frames; they do not clean data or discover the best model features. AI is optional for interpreting patterns or difficult identity/visibility cases. Unknown setup facts cannot be reconstructed by a template.
 
-`frame_length_bytes` is IDF's reported `sig_len`, including FCS. RSSI is in dBm. The rows retain raw frame and sequence control, type/subtype, To DS, From DS, retry, sequence, fragment and QoS TID where present. Addresses 1 and 2 are the immediate receiver and transmitter. Raw addresses 3 and 4 support source/destination derivation from the DS bits. Missing addr4 and TID are blank. `wire_seq` identifies a transfer, and `observation_id` counts eligible frames before the ring can drop them. No smoothing, deduplication, unwrapping, synthetic filling or address-based classification is applied.
+## Measurements and processing
 
-## Review capture quality
+The firmware saves selected MAC-header and radio metadata from supported management, data and control callbacks. Host code decodes batches, derives header/PHY fields and filters target-address rows. It preserves raw observations, retries and timestamps. Current CSVs have 47 columns; replay also accepts older 23/31-column archives.
 
-1. Check `result`, `begin_received` and `end_received`. An interrupted link may prevent measuring trailing losses. `completed` means both boundaries arrived after a normal stop. Check counters even for a completed session.
-2. At END, `eligible = sent + overflow + tx_lost`. `sent_minus_rows` should be zero. `overflow` counts eligible frames rejected by the full 1,024-slot ring. `tx_lost` counts records abandoned when the final drain cannot deliver them. A full USB TX buffer causes a bounded retry, counted in `tx_errors`. Retried packets keep their observation IDs. `high_water` is peak occupied slots. All firmware counts restart for each session.
-3. Examine `malformed`, `unsupported` and `rx_errors` (callback records excluded before eligibility), tune errors, wire gaps, observation gaps, CRC errors, trailing partial bytes and watchdog messages. An observation gap can already be explained by queue overflow or transport loss. Do not add these counters to estimate total loss. Boot or console text can appear as unframed bytes. Review the raw file when unexplained bytes occur.
-4. Check `locked` and the observed channel over time. During hopping the radio misses traffic on every other channel. Even all-zero application loss counters cannot measure frames the radio or driver never delivered. This S3 prototype observes 2.4 GHz management, data and control frames and stores metadata only. A silent, wired-only or out-of-band device can remain invisible.
-5. Keep original observations and identifiers for experimental grouping. Generate derived features separately. Hold out whole devices and sessions when evaluating generalisation. These data alone do not establish that a device is a camera, hidden or unauthorised.
+See [measurement definitions and rationale](docs/measurements.md) for fields, omissions, receiver limits and Stage 2 cautions. The frame body, FCS bytes and CSI are currently not exported. Their omission does not prove they are useless.
 
-## Troubleshooting and checks
+## Source files and review tools
 
-- **Serial port access denied.** Close any competing serial monitor or recorder. Enumerate ports again and check the native connector and USB cable. Re-run the chip probe before flashing if the port changes.
-- **No BEGIN or heartbeat.** Check that the updated image booted, the port is the native interface, and the correct recorder was started. A monitor will show binary bytes during recording. Keep the failed session's raw bytes and JSON for diagnosis. A new recorder can start a fresh session after a host disconnect.
-- **Queue or transport drops.** Inspect the high-water mark, terminal counters, host disk/CPU load, CRC failures and gaps. Repeat at the same channel and traffic condition. Keep the failed recording and document the condition.
-- **No camera rows.** Verify the state, test MAC, band and channel. Check whether auto mode is still sweeping. A powered-off camera cannot lock the receiver through its own transmissions.
-- **Build identification.** The recorder reports the firmware ELF SHA. If Windows reports console encoding problems, set `$env:PYTHONUTF8='1'` for that shell.
-- **Regression tests.** Run `python -m unittest discover -s esp32_camera_recorder/esp32_camera_recorder -v`. Recorder exit codes are 0 for completion without flagged quality issues, 1 for an incomplete run and 2 for completion with quality issues.
-
-Recording files contain real wireless addresses and experiment notes. Keep original sessions and local research logs in private storage.
-
-## Optional experiment settings
-
-For a fixed-channel 40 MHz experiment, flash the updated firmware and add
-`--secondary above` or `--secondary below` to the recording command. Match the
-access point's primary channel and secondary position. Both 20 MHz channels
-must fit in channels 1–13. For example:
+| Script in recorder/ | Responsibility |
+| --- | --- |
+| collection.py | Prompts, target/all capture scope, profiles, controlled identity discovery, acquisition checks, canonical folders and manifest |
+| traffic_check.py | Conditional field availability and minimum outgoing-data screening; no camera or 2x2 classification |
+| record_wifi.py | Serial session capture and quality counters; advanced CLI |
+| width_survey.py | Automatic primary/secondary survey and fixed comparisons |
+| protocol.py | Versioned wire decoding and CSV field derivation |
+| audit_recording.py | Replay raw bytes and compare saved exports/counters |
+| session_report.py | Generate or refresh an individual five-section README |
+| device_features.py | Descriptive rates and burst windows; no classification |
 
 ```powershell
-python $rec --port $port --camera $camera --state streaming --channel 6 --secondary above --duration 60
+python recorder/audit_recording.py $sessionFolder
+python recorder/session_report.py $sessionFolder
+python recorder/device_features.py $sessionFolder --mac $targetMac --measured-duration --json
+python -m unittest discover -s tests -v
+git diff --check
 ```
 
-Wide recordings use the extended WFS2 v4 status. The recorder compares driver
-readback (`reported_primary` and `reported_secondary`) with the request. To test
-physical reception, use a known HT40 transmitter and look for its data rows with
-`phy_sig_mode=1` and `phy_cwb=1`. A successful tune alone measures configuration.
-Leave out `--secondary` for the original recording commands and firmware.
+Source changes must update relevant instructions. Each new recording must have its own explanation; a top-level README alone does not fulfil this requirement.
 
-### Automatic 20/40 MHz survey for a known MAC
+## Publishing source updates
 
-With the HT40-capable firmware installed, the PC recorder can drive the search.
-Keep the test device doing the same activity throughout the comparison.
+Commit source, firmware, generic instructions and synthetic tests together so the wire schema and host decoder stay compatible. Git should contain collect.py, requirements.txt, recorder/, main/, tests/, docs/, README.md and AGENTS.md, along with build/editor configuration. It should not contain .venv/, build/, profiles/, recordings/ or archive/. The ignore rules keep generated/local files out; they do not protect files already tracked.
+
+From the repository root, after validation:
 
 ```powershell
-$rec = 'esp32_camera_recorder/esp32_camera_recorder/record_wifi.py'
-python $rec --port $port --camera $camera --state streaming --channel auto --secondary auto --duration 60
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+git diff --check
+git status --short --untracked-files=normal
+git add -A
+git diff --cached --stat
+git diff --cached
+# Review the staged file list and content for private data before these steps:
+git commit -m "Add C5 collection workflow with traffic checks and grouped recordings"
+git push origin main
 ```
 
-For each primary from 1 through 13 it tries 20 MHz, then each valid secondary
-above or below (four channel numbers away). It spends two seconds recording
-at each setting by default. Increase `--probe-seconds` for a quiet transmitter.
-The search stops at the first primary with a decoded **transmission from the target**
-on that primary. A frame merely addressed to the MAC does not select a channel.
-If one full sweep finds nothing, the result is `target_not_observed`; a quiet
-device or one the receiver cannot decode may still be present. To search only a
-known primary, replace `--channel auto` with its channel number.
-
-Once the target is heard, the recorder takes a fresh fixed-channel recording at
-20 MHz and at **every valid 40 MHz setting on that primary**, including when
-the initial sighting was at 20 MHz. `--duration` applies to each comparison
-(default 60 seconds). Search and comparison runs each have their own raw bytes,
-packet CSVs, timestamps and counters. Label offsets start at each run's BEGIN.
-Ctrl+C ends the whole survey.
-
-Open `survey.json` in the printed survey directory. Compare entries with
-`phase=compare` using target data frames/s, frame bytes/s, retries and counts
-of data frames sent and received at HT40. Width evidence uses the frame's HT
-mode and width flag. An HT40 receiver setting can deliver 20 MHz frames as well.
-Rates use measured BEGIN-to-END time including drain; frame bytes include Wi-Fi
-overhead and retries. Use each comparison folder with `device_features.py
---burst-windows` to examine timing. Review tune failures, missing target data
-and capture losses alongside the counts. Measurements are sequential, so repeat
-the activity across runs to assess how consistently a difference appears.
-
-Optionally pass `--labels labels.json` with any recording. The recorder copies
-these operator annotations into `session.json`. Times are seconds from BEGIN;
-omitting start or end means session start or session end. The same device may
-have several activity intervals. For example:
-
-```json
-[
-  {"mac":"02:00:00:00:00:01","alias":"camera A","device_class":"camera","activity":"live view","start_s":10,"end_s":40},
-  {"mac":"02:00:00:00:00:02","alias":"phone B","device_class":"phone","activity":"video call"}
-]
-```
-
-For existing or new fixed-channel recordings, export outgoing traffic for one
-device in 100 ms windows, or opt into elapsed-time rates in the usual summary:
-
-```powershell
-$features = 'esp32_camera_recorder/esp32_camera_recorder/device_features.py'
-python $features $folder --mac $camera --burst-windows
-python $features $folder --mac $camera --measured-duration
-```
-
-Window output is CSV (or use `--json`). Its time origin is the first observed
-Wi-Fi frame; it ends with the window containing the last observed frame.
-Empty intervening windows have zero counts. Lengths include Wi-Fi overhead and
-retries; retry counts are shown separately. Only data subtypes carrying data are
-included. A new burst starts after a gap of at least 10 ms. Adjust this analysis
-threshold with `--burst-gap-ms` and window size with `--window-ms`. Gap and
-burst-period medians use the later frame's window. These bursts describe radio
-traffic. The optional measured duration uses device BEGIN through END (including
-the final drain). Default summary calculations retain their original denominator.
-
-For a read-only consistency check, run `python esp32_camera_recorder/esp32_camera_recorder/audit_recording.py <session-folder>`. It replays the raw file, compares every decoded measurement, filtered row and status record against the exports, and checks terminal counts. Host receipt times exist only in the exports. A passing replay can still report firmware drops.
+The commands assume the intended branch is main and origin points to this repository. Use a branch/PR if the remote requires it. If the remote moved ahead, fetch and integrate the changes before pushing; do not force-push over other work. Git records the old nested Python folder as removed/moved and adds recorder/; uploading only collect.py would leave an incomplete release. Capture output folders are created when the script runs and need not exist in a fresh clone.

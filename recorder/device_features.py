@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 BROADCAST = "ff:ff:ff:ff:ff:ff"
-SIG_MODE = {"0": "non-HT", "1": "HT", "3": "VHT"}
+SIG_MODE = {"0": "non-HT", "1": "HT", "2": "HE", "3": "VHT"}
 
 
 def is_group(mac):
@@ -40,9 +40,10 @@ def is_group(mac):
 
 def load(folder):
     folder = Path(folder)
-    with (folder / "all_wifi_packets.csv").open(newline="") as f:
-        rows = list(csv.DictReader(f))
     meta = json.loads((folder / "session.json").read_text(encoding="utf8"))
+    csv_name = "camera_packets.csv" if meta.get("capture_scope", "all") == "target" else "all_wifi_packets.csv"
+    with (folder / csv_name).open(newline="") as f:
+        rows = list(csv.DictReader(f))
     return rows, meta
 
 
@@ -64,6 +65,8 @@ def features(rows, mac, duration):
     modes = {SIG_MODE.get(r.get("phy_sig_mode"), r.get("phy_sig_mode"))
              for r in mine if r.get("phy_sig_mode")}
     mcs = [int(r["phy_mcs"]) for r in mine if r.get("phy_mcs") not in ("", None)]
+    ht_mcs = [int(r["phy_mcs"]) for r in mine
+              if r.get("phy_sig_mode") == "1" and r.get("phy_mcs") not in ("", None)]
     return {
         "frames": len(mine),
         "frames_per_s": round(len(mine) / duration, 2),
@@ -80,8 +83,8 @@ def features(rows, mac, duration):
         "payload_mbps": round(sum(lengths) * 8 / duration / 1e6, 3) if lengths else 0.0,
         "phy_modes": sorted(modes),
         "max_mcs": max(mcs) if mcs else None,
-        "spatial_streams_hint": ("2 (MCS>=8)" if mcs and max(mcs) >= 8 else
-                                 "1 (MCS<=7)" if mcs else "unknown"),
+        "spatial_streams_hint": ("multiple (HT MCS 8..31)" if any(8 <= x <= 31 for x in ht_mcs) else
+                                 "1 (HT MCS 0..7)" if any(0 <= x <= 7 for x in ht_mcs) else "unknown"),
     }
 
 

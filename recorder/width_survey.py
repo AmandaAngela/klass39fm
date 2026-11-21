@@ -2,6 +2,7 @@
 import csv
 import json
 import secrets
+import time
 from copy import copy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +19,7 @@ def settings(primary):
 
 
 def target_measurements(folder, mac, primary):
-    tx = data = size = ht40 = retries = 0
+    tx = data = size = ht40 = he40 = retries = he_data = unknown_width = 0
     rx_data = rx_ht40 = 0
     with (folder / "camera_packets.csv").open(newline="", encoding="utf8") as f:
         for row in csv.DictReader(f):
@@ -26,6 +27,7 @@ def target_measurements(folder, mac, primary):
                 continue
             carries_data = row["frame_type"] == "2" and not (int(row["frame_subtype"]) & 4)
             is_ht40 = row["phy_sig_mode"] == "1" and row["phy_cwb"] == "1"
+            is_he40 = row["phy_sig_mode"] == "2" and row["phy_cwb"] == "1"
             if carries_data and row["addr1_ra"] == mac:
                 rx_data += 1
                 rx_ht40 += is_ht40
@@ -38,9 +40,14 @@ def target_measurements(folder, mac, primary):
             size += int(row["frame_length_bytes"])
             retries += int(row["retry"])
             ht40 += is_ht40
+            he40 += is_he40
+            he_data += row["phy_sig_mode"] == "2"
+            unknown_width += row["phy_cwb"] == ""
     seconds = measured_seconds(folder)
     return dict(target_tx_frames=tx, target_tx_data_frames=data, target_tx_frame_bytes=size,
                 target_tx_retry_frames=retries, target_tx_ht40_data_frames=ht40,
+                target_tx_he40_data_frames=he40, target_tx_40mhz_data_frames=ht40 + he40,
+                target_tx_he_data_frames=he_data, target_tx_unknown_width_data_frames=unknown_width,
                 target_rx_data_frames=rx_data, target_rx_ht40_data_frames=rx_ht40,
                 measured_seconds=seconds, target_tx_data_frames_per_s=round(data / seconds, 3),
                 target_tx_frame_bytes_per_s=round(size / seconds, 3))
@@ -58,11 +65,22 @@ def survey(args, record):
     def save():
         temp = root / "survey.tmp"
         temp.write_text(json.dumps(report, indent=2) + "\n", encoding="utf8")
-        temp.replace(root / "survey.json")
+        # Windows indexers/readers can briefly hold the destination open.
+        for attempt in range(20):
+            try:
+                temp.replace(root / "survey.json")
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
 
     def capture(phase, primary, secondary, seconds):
         run = copy(args)
         run.channel, run.secondary, run.duration = primary, secondary, seconds
+        run.collection_discovery = dict(channel=args.channel, secondary="auto",
+            probe_seconds=probe_time, comparison_seconds=compare_time,
+            phase=phase, survey_folder=str(root))
         name = f"{phase}_ch{primary}_{secondary or '20MHz'}_{secrets.token_hex(4)}"
         entry = dict(phase=phase, primary=primary, secondary=secondary or "none",
                      requested_seconds=seconds, folder=name, result="in_progress")
@@ -93,14 +111,24 @@ def survey(args, record):
         primaries = [args.channel] if args.channel else range(1, 14)
         for primary in primaries:
             for secondary in settings(primary):
-                if capture("probe", primary, secondary, probe_time):
-                    report["primary"] = primary
-                    break
-            if report["primary"] is not None:
-                break
-        if report["primary"] is None:
+                capture("probe", primary, secondary, probe_time)
+        observed = [r for r in report["runs"] if r.get("target_tx_frames", 0)]
+        if not observed:
             report["result"] = "target_not_observed"
             return 2
+
+        # Adjacent channels can hear control/probe traffic. Finish the survey
+        # before choosing; prefer a 20 MHz data-bearing primary, then wide-only
+        # data, and finally a documented sparse/control-only fallback.
+        data = [r for r in observed if r.get("target_tx_data_frames", 0)]
+        narrow_data = [r for r in data if r["secondary"] == "none"]
+        pool = narrow_data or data or observed
+        selected = max(pool, key=lambda r: (r.get("target_tx_data_frames_per_s", 0),
+                           r.get("target_tx_frame_bytes_per_s", 0), r["target_tx_frames"]))
+        report["primary"] = selected["primary"]
+        report["selection_basis"] = ("strongest_20mhz_data" if narrow_data else
+                                     "strongest_wide_data" if data else "sparse_or_control_only")
+        report["selected_probe"] = selected["folder"]
 
         primary = report["primary"]
         for secondary in settings(primary):
@@ -109,6 +137,8 @@ def survey(args, record):
         report["result"] = "completed"
         report["target_tx_ht40_observed_in_comparison"] = any(
             r.get("target_tx_ht40_data_frames", 0) for r in comparisons)
+        report["target_tx_40mhz_observed_in_comparison"] = any(
+            r.get("target_tx_40mhz_data_frames", 0) for r in comparisons)
         # Empty off-channel probes are expected. Preserve their original findings.
         review = any(k != "empty_capture" or r["phase"] == "compare"
                      for r in report["runs"] for k in r["quality_findings"])

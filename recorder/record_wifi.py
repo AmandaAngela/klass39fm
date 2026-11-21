@@ -14,8 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import serial
+from serial.tools import list_ports
 from protocol import Decoder, FIELDS, rows, status_fields
 from width_survey import survey
+from session_report import write_session_readme
 
 
 def utc():
@@ -39,6 +41,14 @@ def channel_mode(value):
     raise argparse.ArgumentTypeError("use auto, scan or a channel from 1 to 13")
 
 
+def transport_interface(port):
+    """Recognise Espressif's native USB Serial/JTAG port on Windows/Linux/macOS."""
+    for item in list_ports.comports():
+        if item.device.casefold() == str(port).casefold() and (item.vid, item.pid) == (0x303A, 0x1001):
+            return "usb_serial_jtag"
+    return "serial_bridge_or_unknown"
+
+
 class Session:
     def __init__(self, info, folder, files):
         self.info = info
@@ -46,14 +56,17 @@ class Session:
         self.decoder = Decoder()
         self.raw = files.enter_context((folder / "raw_serial.bin").open("xb"))
         self.log = files.enter_context((folder / "status.jsonl").open("x", encoding="utf8"))
-        self.writers = []
         self.outputs = [self.raw, self.log]
-        for name in ("all_wifi_packets.csv", "camera_packets.csv"):
-            stream = files.enter_context((folder / name).open("x", newline="", encoding="utf8"))
-            writer = csv.DictWriter(stream, fieldnames=FIELDS)
-            writer.writeheader()
+        self.all_writer = None
+        if info.get("capture_scope", "all") == "all":
+            stream = files.enter_context((folder / "all_wifi_packets.csv").open("x", newline="", encoding="utf8"))
+            self.all_writer = csv.DictWriter(stream, fieldnames=FIELDS)
+            self.all_writer.writeheader()
             self.outputs.append(stream)
-            self.writers.append(writer)
+        stream = files.enter_context((folder / "camera_packets.csv").open("x", newline="", encoding="utf8"))
+        self.camera_writer = csv.DictWriter(stream, fieldnames=FIELDS)
+        self.camera_writer.writeheader()
+        self.outputs.append(stream)
         self.count = Counter({k: 0 for k in ("rows", "camera_rows", "wire_gaps",
             "observation_gaps", "wire_backwards", "observation_backwards", "equal_adjacent_timestamps",
             "timestamp_decreases", "watchdog_messages", "foreign_frames", "bytes")})
@@ -91,10 +104,11 @@ class Session:
                 self.ended |= kind == b"E"
                 continue
             for row in rows(received, seq, payload):
-                self.writers[0].writerow(row)
+                if self.all_writer is not None:
+                    self.all_writer.writerow(row)
                 self.count["rows"] += 1
                 if self.info["camera_mac"] in (row["addr1_ra"], row["addr2_ta"]):
-                    self.writers[1].writerow(row)
+                    self.camera_writer.writerow(row)
                     self.count["camera_rows"] += 1
                 ident = row["observation_id"]
                 self.count["observation_gaps"] += max(0, ident - self.last_id - 1)
@@ -138,10 +152,20 @@ def record(args, *, folder=None):
                                       + f"{args.state}_{token:08x}")
     folder.mkdir(parents=True, exist_ok=False)
     print(f"Recording directory {folder.resolve()}", flush=True)
+    capture_scope = getattr(args, "capture_scope", "all")
+    if capture_scope not in ("target", "all"):
+        raise ValueError("capture_scope must be 'target' or 'all'")
+    capture_scope = "target" if capture_scope == "target" and args.camera else "all"
+    interface = transport_interface(args.port)
     info = dict(format="WFS2", token=token, opened_utc=utc(), camera_mac=args.camera,
                 camera_state=args.state, requested_mode=args.channel, notes=args.notes,
                 port=args.port, baud=args.baud, requested_seconds=args.duration,
-                camera_filter="addr1_ra or addr2_ta equals camera_mac", result="in_progress")
+                camera_filter="addr1_ra or addr2_ta equals camera_mac", capture_scope=capture_scope,
+                transport_interface=interface,
+                result="in_progress")
+    info["recording_output_root"] = str(args.output)
+    if getattr(args, "collection_discovery", None):
+        info["collection_discovery"] = args.collection_discovery
     secondary = getattr(args, "secondary", None)
     if secondary:
         info.update(requested_width_mhz=40, requested_secondary=secondary)
@@ -154,6 +178,8 @@ def record(args, *, folder=None):
         interrupted = True
 
     with ExitStack() as files:
+        # Registered first: run after CSV/raw/status handles close, on all exits.
+        files.callback(write_session_readme, folder, getattr(args, "report_context", None))
         session = Session(info, folder, files)
         session.checkpoint()
         previous = signal.signal(signal.SIGINT, on_interrupt)
@@ -162,12 +188,17 @@ def record(args, *, folder=None):
         try:
             # Configure modem lines before opening. Flash/reset tools own EN/BOOT.
             link = serial.Serial(baudrate=args.baud, timeout=0.1, write_timeout=1)
-            link.dtr = False
+            # The UART bridge's DTR can reset some boards, so keep it low there.
+            # The native USB Serial/JTAG CDC path needs DTR asserted for app RX.
+            if interface != "usb_serial_jtag":
+                link.dtr = False
             link.rts = False
             link.port = args.port
             with link as port:
                 wire_target = args.camera.replace(":", "") if args.camera else "000000000000"
                 verb = {"above": "WIDE+", "below": "WIDE-"}.get(secondary, "START")
+                if capture_scope == "target":
+                    verb = "T" + verb
                 start_command = f"\n{verb} {token:08x} {args.channel} {wire_target}\n".encode()
                 opened = time.monotonic()
                 last_start = last_frame = flushed = opened
@@ -181,6 +212,10 @@ def record(args, *, folder=None):
                     if old_seq != session.last_seq:
                         last_frame = now
                     if session.begun and began_at is None:
+                        expected = getattr(args, "expected_target", None)
+                        if expected and session.last_status.get("target") != expected:
+                            port.write(f"STOP {token:08x}\n".encode())
+                            raise RuntimeError(f"Expected {expected}; receiver reports {session.last_status.get('target')}")
                         if secondary:
                             status = session.last_status
                             if (status.get("reported_primary") != args.channel or
@@ -266,8 +301,11 @@ def load_labels(path):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--port", required=True, help="serial port of the receiver")
-    p.add_argument("--baud", type=int, default=115200)
+    p.add_argument("--baud", type=int, default=921600,
+                   help="UART baud (default 921600); native USB treats this as nominal")
     p.add_argument("--camera", type=camera_mac, help="test-device MAC for filtering and automatic lock")
+    p.add_argument("--capture-scope", choices=("target", "all"), default="all",
+                   help="target: queue only frames with the MAC as receiver/transmitter; all: preserve all channel frames")
     p.add_argument("--state", choices=("unknown", "idle", "streaming", "off", "motion",
                                      "motion-triggered", "background"), default="unknown")
     p.add_argument("--channel", type=channel_mode, help="auto, scan, or channel number")
@@ -286,6 +324,8 @@ def main():
         args.channel = 0 if args.camera else -1
     if args.channel == 0 and not args.camera:
         p.error("--channel auto requires --camera")
+    if args.capture_scope == "target" and not args.camera:
+        p.error("--capture-scope target requires --camera")
     if args.secondary in ("above", "below") and (args.channel < 1 or
             not 1 <= args.channel + (4 if args.secondary == "above" else -4) <= 13):
         p.error("--secondary requires a fixed primary and secondary channel within 1..13")
