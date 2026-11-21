@@ -16,6 +16,7 @@ from pathlib import Path
 import serial
 from protocol import Decoder, FIELDS, rows, status_fields
 from width_survey import survey
+from session_report import write_session_readme
 
 
 def utc():
@@ -142,6 +143,9 @@ def record(args, *, folder=None):
                 camera_state=args.state, requested_mode=args.channel, notes=args.notes,
                 port=args.port, baud=args.baud, requested_seconds=args.duration,
                 camera_filter="addr1_ra or addr2_ta equals camera_mac", result="in_progress")
+    info["recording_output_root"] = str(args.output)
+    if getattr(args, "collection_discovery", None):
+        info["collection_discovery"] = args.collection_discovery
     secondary = getattr(args, "secondary", None)
     if secondary:
         info.update(requested_width_mhz=40, requested_secondary=secondary)
@@ -154,6 +158,8 @@ def record(args, *, folder=None):
         interrupted = True
 
     with ExitStack() as files:
+        # Registered first: run after CSV/raw/status handles close, on all exits.
+        files.callback(write_session_readme, folder, getattr(args, "report_context", None))
         session = Session(info, folder, files)
         session.checkpoint()
         previous = signal.signal(signal.SIGINT, on_interrupt)
@@ -181,6 +187,10 @@ def record(args, *, folder=None):
                     if old_seq != session.last_seq:
                         last_frame = now
                     if session.begun and began_at is None:
+                        expected = getattr(args, "expected_target", None)
+                        if expected and session.last_status.get("target") != expected:
+                            port.write(f"STOP {token:08x}\n".encode())
+                            raise RuntimeError(f"Expected {expected}; receiver reports {session.last_status.get('target')}")
                         if secondary:
                             status = session.last_status
                             if (status.get("reported_primary") != args.channel or
@@ -266,7 +276,8 @@ def load_labels(path):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--port", required=True, help="serial port of the receiver")
-    p.add_argument("--baud", type=int, default=115200)
+    p.add_argument("--baud", type=int, default=921600,
+                   help="UART baud (default 921600); native USB treats this as nominal")
     p.add_argument("--camera", type=camera_mac, help="test-device MAC for filtering and automatic lock")
     p.add_argument("--state", choices=("unknown", "idle", "streaming", "off", "motion",
                                      "motion-triggered", "background"), default="unknown")

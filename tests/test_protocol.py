@@ -10,12 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import serial
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "recorder"))
 
 from audit_recording import audit
-from protocol import (CRC, Decoder, FIELDS, HEADER, MAGIC, PACKET, PACKET_V3, PHY_FIELDS,
-                      STATUS, rows)
+from protocol import (CRC, Decoder, FIELDS, HEADER, MAGIC, PACKET, PACKET_V3, PACKET_V5,
+                      PHY_FIELDS, STATUS, rows, layout_for)
 from record_wifi import Session, record, load_labels
-from device_features import burst_windows, measured_seconds
+from device_features import burst_windows, measured_seconds, features
 from width_survey import settings, survey
 
 
@@ -36,6 +38,34 @@ def packet_v3(ident, fc, phy=0, mcs=0, rate=11, noise=-96):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_c5_signal_formats_and_all_batch_sizes(self):
+        ht = 7 | (1 << 7) | (1 << 27) | (1 << 28) | (1 << 30) | (1 << 31)
+        he = (9 << 3) | (1 << 7) | (23 << 8) | (1 << 19) | (2 << 21) | (1 << 2)
+        for fmt, siga1, siga2 in ((2, ht, 0), (4, he, (1 << 7) | (1 << 10)), (5, 0, 0)):
+            body = PACKET_V5.pack(1, 578, 100, 8, 0, -50, 6, 255,
+                bytes([1])*6, bytes([2])*6, bytes(6), bytes(6),
+                255, 255, 255, -95, siga1, siga2, 96, fmt, 1, 11, 0, 0, 1, 0)
+            for version in (5, 6):
+                for count in range(1, 33):
+                    frames = list(Decoder().feed(wire(b"P", 0, body * count, version), final=True))
+                    self.assertEqual(len(frames), 1)
+                    self.assertIs(layout_for(frames[0][3]), PACKET_V5)
+                    self.assertEqual(len(list(rows("", 0, frames[0][3]))), count)
+            item, = rows("", 0, body)
+            self.assertEqual((item["phy_rx_format"], item["driver_dump_length_bytes"]), (fmt, 96))
+            self.assertEqual(item["phy_legacy_rate"], "")
+            if fmt == 2:
+                self.assertEqual((item["phy_sig_mode"], item["phy_mcs"], item["phy_cwb"],
+                    item["phy_aggregation"], item["phy_sgi"], item["phy_fec_coding"]), (1, 7, 1, 1, 1, 1))
+                self.assertEqual(item["phy_he_bss_color"], "")
+            elif fmt == 4:
+                self.assertEqual((item["phy_sig_mode"], item["phy_mcs"], item["phy_cwb"]), (2, 9, 1))
+                self.assertEqual((item["phy_he_bss_color"], item["phy_he_gi_ltf"], item["phy_he_dcm"]), (23, 2, 1))
+                self.assertEqual(item["phy_sgi"], "")
+            else:
+                self.assertEqual(item["phy_sig_mode"], 2)
+                self.assertEqual((item["phy_mcs"], item["phy_cwb"]), ("", ""))
+
     def test_checkpoint_retries_transient_windows_file_lock(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as files:
             folder = Path(tmp)
@@ -82,10 +112,12 @@ class ProtocolTests(unittest.TestCase):
                 version = 4 if wide else 3
                 # Incoming wide data addressed to the target on every setting. Only
                 # the above pair on channel 6 hears its outgoing data-bearing frames.
+                # Early control traffic must not win over a later data channel.
                 outgoing = primary == 6 and verb == "WIDE+"
                 observations = []
                 for i, (fc, first, second) in enumerate([(8, 2, 1)] +
-                        ([(8, 1, 2), (0xc8, 1, 2)] if outgoing else []), 1):
+                        ([(8, 1, 2), (0xc8, 1, 2)] if outgoing else []) +
+                        ([(0xb4, 1, 2)] if primary == 1 else []), 1):
                     observations.append(PACKET_V3.pack(i, i, 100, fc, 0, -50, primary, 255,
                         bytes([first])*6, bytes([second])*6, bytes(6), bytes(6), 5, 1, 0, -90))
                 def status(ts, count):
@@ -156,6 +188,10 @@ class ProtocolTests(unittest.TestCase):
                                  (f"\n{verb} 0000007b 6 000000000000\n".encode(),))
                 folder, = Path(tmp).iterdir()
                 self.assertEqual(audit(folder)["rows"], 1)
+                report = (folder / "README.md").read_text()
+                self.assertIn("## 5. Suggestions/recommendations for Stage 2", report)
+                self.assertIn("| All decoded channel observations | 1 |", report)
+                self.assertIn("Passed: raw measurements", report)
                 info = json.loads((folder / "session.json").read_text())
                 self.assertEqual(info["latest_firmware_status"].get("reported_secondary"), secondary)
                 self.assertEqual(measured_seconds(folder), 1)
@@ -303,10 +339,22 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(info["result"], "incomplete")
             self.assertTrue(info["begin_received"])
             self.assertFalse(info["end_received"])
+            self.assertIn("BEGIN/END incomplete", (folder / "README.md").read_text())
             self.assertEqual(info["decoder"]["trailing_partial_bytes"], 24)
             self.assertEqual((folder / "raw_serial.bin").read_bytes(), raw)
             with self.assertRaisesRegex(ValueError, "boundaries incomplete"):
                 audit(folder)
+
+
+class PhyFeatureRegression(unittest.TestCase):
+    def test_he_mcs_does_not_imply_two_streams(self):
+        row, = rows("utc", 0, packet(1, 0x108))
+        row.update(phy_sig_mode="2", phy_mcs="9")
+        result = features([row], row["addr2_ta"], 1)
+        self.assertEqual(result["spatial_streams_hint"], "unknown")
+        row.update(phy_sig_mode="1", phy_mcs="7")
+        self.assertEqual(features([row], row["addr2_ta"], 1)["spatial_streams_hint"],
+                         "1 (HT MCS 0..7)")
 
 
 if __name__ == "__main__":

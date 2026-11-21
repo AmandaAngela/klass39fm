@@ -17,6 +17,14 @@ typedef struct __attribute__((packed)) {
     uint8_t mcs;       // 0-76, meaningful when sig_mode is HT or VHT
     uint8_t rate;      // legacy PHY rate encoding, meaningful when sig_mode is non-HT
     int8_t noise_floor;
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+    // Preserve the C5 signal fields for later PHY analysis. They are not frame bodies.
+    uint32_t sig_a1;
+    uint16_t sig_a2, dump_length;
+    uint8_t rx_format, secondary, l_sig_rate, rx_end_state;
+    uint16_t sigb_length;
+    uint8_t channel_estimate_valid, group_addressed;
+#endif
 } observation_t;
 typedef struct {
     uint32_t eligible, overflow, malformed, unsupported, rx_errors, high_water;

@@ -35,7 +35,12 @@ typedef struct __attribute__((packed)) {
 // Version 3 adds four PHY bytes per observation (41 -> 45). The magic word stays
 // "WFS2" so a host resynchronising a version-2 archive still finds frame starts;
 // the version byte is what selects the record layout.
-_Static_assert(sizeof(observation_t) == 45 && sizeof(header_t) == 16 &&
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+enum { OBSERVATION_BYTES = 61, WIRE_VERSION = 5 };
+#else
+enum { OBSERVATION_BYTES = 45, WIRE_VERSION = 3 };
+#endif
+_Static_assert(sizeof(observation_t) == OBSERVATION_BYTES && sizeof(header_t) == 16 &&
                sizeof(status_t) == 131 && sizeof(wide_status_t) == 133, "wire schema mismatch");
 
 static struct {
@@ -61,7 +66,7 @@ static int64_t next_hop, next_status;
 
 static bool send_frame(char kind, size_t bytes)
 {
-    frame.header = (header_t){.magic = {'W','F','S','2'}, .version = wide_session ? 4 : 3, .kind = kind,
+    frame.header = (header_t){.magic = {'W','F','S','2'}, .version = WIRE_VERSION + wide_session, .kind = kind,
         .bytes = bytes, .token = token, .serial = serial_no};
     size_t length = sizeof(header_t) + bytes;
     uint32_t crc = esp_rom_crc32_le(0, (uint8_t *)&frame, length);
@@ -230,6 +235,10 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_init(&config));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
     ESP_ERROR_CHECK(esp_wifi_start());
+#if CONFIG_SOC_WIFI_SUPPORT_5G
+    // The band API requires a started driver. Keep the collection on 2.4 GHz.
+    ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY));
+#endif
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     const wifi_country_t country = {.cc = "MY", .schan = 1, .nchan = CHANNELS,
         .max_tx_power = 20, .policy = WIFI_COUNTRY_POLICY_MANUAL};

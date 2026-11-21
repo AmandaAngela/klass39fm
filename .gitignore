@@ -17,6 +17,8 @@
 *.log
 
 # Local research recordings, copies, and handoff notes
+/archive/
+/profiles/
 /validation/
 /dataset/
 /finaliser/

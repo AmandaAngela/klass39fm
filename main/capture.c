@@ -70,7 +70,21 @@ static enum parse_result parse(const wifi_promiscuous_pkt_t *pkt,
     if (pkt->rx_ctrl.rx_state) return RX_ERROR;
     const uint8_t *f = pkt->payload;
     unsigned length = pkt->rx_ctrl.sig_len; // includes four-byte FCS
-    if (length < 10 + 4) return MALFORMED;  // ACK and CTS are the shortest frames
+    unsigned available = length >= 4 ? length - 4 : 0;
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+    if (pkt->rx_ctrl.rxend_state) return RX_ERROR;
+    available = pkt->rx_ctrl.dump_len;
+    // C5 IDF v6.1 callbacks observed dump_len == sig_len + 4, despite the
+    // header comment describing dump_len as excluding FCS. Bound header reads
+    // by the smaller value and retain dump_len independently in the record.
+    if (available == length + 4) {
+        unsigned reported = available;
+        available = length;
+        length = reported;
+    }
+    if (available > length) return MALFORMED;
+#endif
+    if (length < 10 + 4 || available < 10) return MALFORMED;
     uint16_t fc = f[0] | ((uint16_t)f[1] << 8);
     unsigned type = (fc >> 2) & 3;
     unsigned expected = kind == WIFI_PKT_DATA ? 2 : kind == WIFI_PKT_CTRL ? 1 : 0;
@@ -79,11 +93,25 @@ static enum parse_result parse(const wifi_promiscuous_pkt_t *pkt,
     r->rssi = pkt->rx_ctrl.rssi;
     r->length = length;
     r->channel = pkt->rx_ctrl.channel;
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+    r->phy = r->mcs = r->rate = 255; // legacy packed PHY fields are unavailable
+    r->sig_a1 = pkt->rx_ctrl.he_siga1;
+    r->sig_a2 = pkt->rx_ctrl.he_siga2;
+    r->dump_length = pkt->rx_ctrl.dump_len;
+    r->rx_format = pkt->rx_ctrl.cur_bb_format;
+    r->secondary = pkt->rx_ctrl.second;
+    r->l_sig_rate = pkt->rx_ctrl.rate;
+    r->rx_end_state = pkt->rx_ctrl.rxend_state;
+    r->sigb_length = pkt->rx_ctrl.sigb_len;
+    r->channel_estimate_valid = pkt->rx_ctrl.rx_channel_estimate_info_vld;
+    r->group_addressed = pkt->rx_ctrl.is_group;
+#else
     r->phy = (pkt->rx_ctrl.sig_mode & 3) | (pkt->rx_ctrl.cwb << 2) |
              (pkt->rx_ctrl.aggregation << 3) | (pkt->rx_ctrl.sgi << 4) |
              ((pkt->rx_ctrl.stbc & 3) << 5);
     r->mcs = pkt->rx_ctrl.mcs;
     r->rate = pkt->rx_ctrl.rate;
+#endif
     r->noise_floor = pkt->rx_ctrl.noise_floor;
     r->fc = fc;
     if (type == 1) {
@@ -91,17 +119,17 @@ static enum parse_result parse(const wifi_promiscuous_pkt_t *pkt,
         // present; a transmitter address only in the longer variants (RTS, BlockAck,
         // BlockAckReq, PS-Poll, CF-End), so the short ones leave addr2 zeroed.
         memcpy(r->addr[0], f + 4, 6);
-        if (length >= 16 + 4) memcpy(r->addr[1], f + 10, 6);
+        if (available >= 16) memcpy(r->addr[1], f + 10, 6);
         r->tid = 255;
         return VALID;
     }
-    if (length < 24 + 4) return MALFORMED;
+    if (available < 24) return MALFORMED;
     bool four = type == 2 && (fc & 0x300) == 0x300;
     bool qos = type == 2 && (fc & 0x80);
     unsigned qos_offset = four ? 30 : 24;
     unsigned header = qos_offset + (qos ? 2 : 0);
     if ((fc & 0x8000) && (qos || type == 0)) header += 4;
-    if (length < header + 4) return MALFORMED;
+    if (available < header) return MALFORMED;
     r->sc = f[22] | ((uint16_t)f[23] << 8);
     r->tid = qos ? f[qos_offset] & 15 : 255;
     memcpy(r->addr, f + 4, 18);
