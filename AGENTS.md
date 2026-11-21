@@ -10,6 +10,22 @@ Keep real MAC addresses, network names, serial numbers, personal filesystem path
 
 A class label identifies the physical device. An activity label identifies its state during a recording. An idle camera retains the camera class. A purifier's activity is unspecified until the operator describes it. Give a device a non-camera label using confirmed identity rather than its observed traffic pattern.
 
+## Stage 1 documentation and scope
+
+For every Stage 1 code change or data-collection batch, update the applicable README before reporting completion. Maintain the public root `README.md` for the repository overview, source-file responsibilities and reproducible generic commands. Write a batch README inside the ignored collection, dataset or finaliser directory for actual run details, device identifiers and results. Apply the same structure to a newly created collection folder.
+
+Use these sections in order, with enough detail for another person to repeat the work.
+
+1. **Summary of the repository or folder.** State its purpose, Stage 1 collection scope and which experiment or code change it covers.
+2. **File and folder structure.** Show a concise tree and explain each script, firmware module, raw output, metadata file and derived output actually used. Identify inputs and outputs and link the relevant relative paths.
+3. **Steps to replicate collection.** Record environment and dependency versions, receiver target, build/flash requirements, exact script commands in execution order, parameters and the reason for each step. Follow the automatic primary/secondary discovery procedure in this guide. Distinguish discovery, fixed comparison, replay checks and later analysis. Preserve actual locally used values in the ignored batch README and use variables in public examples.
+4. **Summary of collected data and setup.** Describe the confirmed target identities and activities, the device-to-AP topology, 2.4 GHz band, receiver placement/distance/obstructions where known, tested widths, sequential or concurrent conditions, durations, session counts and capture-quality findings. Mark unverified details as unspecified. Explain which frames were observable and accepted, which fields came from the MAC header or driver metadata, what was omitted, and every transformation performed by the code. Include exclusions and their reasons.
+5. **Suggestions for Stage 2.** Give evidence-based cleaning or preprocessing suggestions, assumptions and ways to validate them. Suggestions remain proposals until the operator authorises implementing that work. Preserve Stage 1 raw observations and document any later derived data separately.
+
+Stage 1 covers sensing, transport, storage, replay verification and operator-supplied ground truth. Automated camera/non-camera classification belongs to Stage 5. During collection, do not add classification scripts, traffic thresholds that assign device classes, model predictions or claims about which feature an AI will choose. Target-MAC filtering and copying operator labels associate measurements with a known experimental device. They are not classification results. Existing descriptive feature summaries can support acquisition review when their transformations are documented.
+
+Document the actual measurement sources accurately. A Wi-Fi frame can contain a MAC header, frame body and FCS. This firmware exports selected MAC-header fields, whole-frame length and receive timestamp/RSSI/PHY metadata from the driver. Beacon observations are a management subtype. Payload/frame-body bytes, the FCS value and CSI are outside the current exported schema. MAC-header fields are useful candidates, and the usefulness of other available measurements remains an experimental question.
+
 ## Receiver and capture capabilities
 
 The current firmware targets ESP32-S3 with ESP-IDF v6.1. It listens passively to supported 2.4 GHz 802.11b/g/n transmissions using a single spatial stream. The configured country plan and channels are in `main/main.c`. The current implementation uses channels 1-13. Match the operating channel plan when changing environments.

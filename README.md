@@ -2,7 +2,45 @@
 
 This prototype records passive 802.11 management, data and control frame metadata visible to one receiver. It can discover active transmitters, follow a known test transmitter, or listen on a fixed channel. It requires no router credentials. Camera state is an operator-supplied experiment label. Other traffic, including uploads and video calls, can resemble a camera stream.
 
-## Build and flash
+Stage 1 collects and verifies observations with operator-supplied device identities and activities. Automated camera/non-camera classification is reserved for Stage 5. Descriptive traffic measurements and target-MAC filtering support collection review and ground-truth association.
+
+## File and folder structure
+
+```text
+main/
+  main.c                    Wi-Fi setup, channel commands, status and batch delivery
+  capture.c                 Callback parsing, observation IDs, counters and ring buffer
+  capture.h                 Observation and capture-counter layouts
+  transport.c, transport.h  Native USB Serial/JTAG or UART transport
+esp32_camera_recorder/esp32_camera_recorder/
+  record_wifi.py            Serial recorder, labels, session files and quality checks
+  protocol.py               Binary decoding and CSV field derivation
+  width_survey.py           Automatic 20/40 MHz search and sequential comparisons
+  audit_recording.py        Raw-stream replay and export consistency checks
+  device_features.py        Separate descriptive rates and burst-window analysis
+  test_protocol.py          Synthetic recorder/protocol regression tests
+recordings/                 Local discovery runs, labels, logs and diagnostics
+dataset/                    Local organised class/activity/width session groups
+finaliser/                  Local reviewed session copies and selection manifests
+AGENTS.md                   Recording procedure and Stage 1 documentation requirements
+CAPSTONE_CONTEXT.md         Research objective and experimental scope
+```
+
+`CMakeLists.txt` and `main/CMakeLists.txt` define the ESP-IDF build. The `.devcontainer/` files describe an optional container environment. Capture directories and experiment-specific documentation are ignored by Git.
+
+Every Stage 1 source change must update the relevant public file descriptions and reproduction steps. Every collection batch must also have a README in its ignored output folder with the following sections, populated from the actual run.
+
+1. Summary of the repository or collection folder.
+2. File/folder structure and the role of each file used.
+3. Steps to replicate collection, including versions, commands, parameters and why each step was performed.
+4. Summary of collected data and setup, including target activity, topology, band, placement, frame types, extracted measurements, transformations, durations, counts and quality findings. Mark unknown setup details explicitly.
+5. Suggestions for Stage 2 cleaning or preprocessing, with assumptions and validation steps.
+
+Use variables in public commands. Keep actual MACs, SSIDs, personal paths, experiment notes and detailed collection results in the ignored batch README and session metadata. README entries must distinguish implemented processing from proposed future work.
+
+## Steps to replicate collection
+
+### Build and flash
 
 Open an ESP-IDF v6.1 PowerShell environment in the project root. In a fresh checkout select the ESP32-S3 target before building. Existing configured workspaces can start at the build step.
 
@@ -17,27 +55,46 @@ idf.py -p $port flash
 
 Confirm the board and port before flashing. Close IDF Monitor or any other process holding the receiver port. The tested interface uses native USB Serial/JTAG (Espressif VID 303A, PID 1001). Connect the board's native USB connector. A separate USB-to-UART bridge on this board carries console output. USB line baud is nominal. The fallback on targets without Serial/JTAG uses UART0 at 921600 baud and requires validation on the target. The firmware uses the MY country plan (channels 1–13). Verify the local channel plan before moving the receiver.
 
-## Record an experiment
+### Record an experiment
 
 From the project root in the activated shell:
 
 ```powershell
 $rec = 'esp32_camera_recorder/esp32_camera_recorder/record_wifi.py'
-python $rec --port $port --state unknown --channel scan --duration 20
-$camera = Read-Host "Test-device MAC address"
-$channel = Read-Host "Test-device channel"
-python $rec --port $port --camera $camera --state idle --channel auto --duration 60
-python $rec --port $port --camera $camera --state streaming --channel $channel --duration 60
-python $rec --port $port --camera $camera --state off --channel $channel --duration 60
-python $rec --port $port --camera $camera --state motion-triggered --channel $channel
+$camera = Read-Host "Current target Wi-Fi MAC address"
+$state = Read-Host "Confirmed camera activity, or unknown for a non-camera target"
+python $rec --port $port --camera $camera --state $state --channel auto --secondary auto --probe-seconds 2 --duration 90 --output recordings/discovery
 ```
+
+Start every new collection run or repeat with both automatic options. The survey searches supported primary channels and valid secondary positions, then records 20 MHz and each valid 40 MHz setting on the discovered primary. Review the selected channel using attributable traffic. A single discovery message can occur while a client is scanning. The duration applies separately to each fixed comparison. Increase probe dwell for a quiet device and preserve unsuccessful search evidence.
+
+The `--camera` argument selects any known test-device MAC. For a non-camera target, use state `unknown` and supply its operator-confirmed class/activity through `--labels` as described below. Keep live view or another requested workload consistent throughout the relevant comparisons. Update the batch README when activity changes or capture quality prevents a planned comparison. Advanced modes below describe the supported CLI, while the automatic survey is the normal collection entry point.
 
 - `scan` cycles channels every 500 ms. `auto` requires a test MAC and locks when address 2 matches it. Without a channel argument, supplying a MAC selects automatic locking and omitting the MAC selects scanning. Untargeted recordings contain all decoded observations and a header-only camera CSV. Channel transitions and lock status appear in `status.jsonl`.
 - A channel number locks immediately, including when the target is off. Use a fixed channel for comparable time series. Each START applies a fresh mode and camera address. The state choices also include `background`, `unknown` and `motion`.
-- Omit `--duration` to record until Ctrl+C. On a normal stop the host requests STOP and waits for the receiver to drain its ring and send its final counters. Abrupt process termination can leave a partial session. Each run creates an exclusive UTC-timestamped directory with a random session token.
+- For a single-mode recording, omit `--duration` to record until Ctrl+C. An automatic survey defaults to 60 seconds per comparison when the duration is omitted. On a normal stop the host requests STOP and waits for the receiver to drain its ring and send its final counters. Abrupt process termination can leave a partial session. Each run creates an exclusive UTC-timestamped directory with a random session token.
 - In `--notes` record a device or model alias, ground-truth basis, environment, distance, obstructions, network setup, receiver placement, stream settings and any state changes. Keep mixed or uncertain states labelled accordingly. The receiver can listen without joining the network.
 
-## Session files and measurements
+## Summary of collected data and setup
+
+For each batch, describe the actual target-to-AP connection, such as a camera connected to a 2.4 GHz router or a confirmed phone hotspot, and the separate passive ESP receiver connected to the recording host. Record which topology was verified. An unassociated receiver can listen without network credentials. Document placement, distance, obstructions, other workloads and changes in settings when known. Keep exact run counts, observed traffic and acquisition findings in the ignored batch README and manifests.
+
+The capture accepts supported management, data and control frames. Beacons are management frames with subtype 8. Acceptance depends on receiver band, primary/secondary tuning, spatial streams, PHY support and parser checks. Report observed counts by frame type in each batch. An absent or largely undecoded target cannot be interpreted as a quiet negative solely from receiver counts.
+
+### Measurement origins and processing
+
+| Source | Information exported or derived |
+| --- | --- |
+| MAC header | Raw frame control, type/subtype, To DS/From DS and retry flags, available address fields, sequence/fragment control and QoS TID |
+| Driver RX metadata | Receive timestamp, RSSI, whole-frame length including FCS, primary channel, PHY mode/rate or MCS, width, aggregation, guard interval, STBC and noise floor |
+| Firmware/host bookkeeping | Observation IDs, wire sequence, host batch-receipt time, session settings, firmware identity and capture/transport counters |
+| Host address derivation | Source/destination from address fields and DS bits, with unavailable fields left blank |
+
+The frame body and FCS value are discarded by the current exporter. Frame length includes the FCS. The serial protocol's CRC checks its own transfers. It is separate from the radio frame FCS. CSI is also outside this schema. MAC-header fields and radio measurements can both support later feature discovery, and collection does not establish which inputs a future model will find useful.
+
+The firmware rejects unsupported, malformed or RX-error callbacks before assigning eligible observation IDs. Accepted observations enter a bounded ring buffer and are exported in CRC-protected batches. The host preserves serial reads, decodes valid session batches, writes the full observation CSV and makes an additional target-address CSV. These are parsing, transport and ground-truth association operations. Class and activity annotations come from the operator. No traffic-based class assignment is applied.
+
+### Session files
 
 | File | Contents |
 | --- | --- |
@@ -131,7 +188,7 @@ have several activity intervals. For example:
 ```json
 [
   {"mac":"02:00:00:00:00:01","alias":"camera A","device_class":"camera","activity":"live view","start_s":10,"end_s":40},
-  {"mac":"02:00:00:00:00:02","alias":"phone B","device_class":"phone","activity":"video call"}
+  {"mac":"02:00:00:00:00:02","alias":"phone B","device_class":"non-camera","activity":"video call"}
 ]
 ```
 
@@ -155,3 +212,11 @@ traffic. The optional measured duration uses device BEGIN through END (including
 the final drain). Default summary calculations retain their original denominator.
 
 For a read-only consistency check, run `python esp32_camera_recorder/esp32_camera_recorder/audit_recording.py <session-folder>`. It replays the raw file, compares every decoded measurement, filtered row and status record against the exports, and checks terminal counts. Host receipt times exist only in the exports. A passing replay can still report firmware drops.
+
+## Suggestions for Stage 2
+
+Record batch-specific suggestions under the same heading in its local README. Possible work includes explicit RX-clock wrap handling, treating missing PHY fields as missing, separating discovery periods from fixed-channel measurements, and creating a separately documented retry-aware analysis view. Check capture loss and temporal coverage before comparing rates or filling silent windows.
+
+Apply consistent window sizes, units and direction definitions across devices. Compare any cleaning choice against the preserved Stage 1 observations and record its effect. Smoothing, resampling, retry removal and feature selection require validation. Descriptive analysis in `device_features.py` writes derived results separately and does not change raw observations.
+
+Stage 1 changes and collection tasks must preserve this separation of work. Suggestions describe possible Stage 2 processing. Automated device classification and traffic-based camera/non-camera rules belong to Stage 5 and require a separate task and evaluation basis.
