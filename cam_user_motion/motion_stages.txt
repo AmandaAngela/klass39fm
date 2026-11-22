@@ -1,0 +1,30 @@
+# Stages for the user-motion test. Use with:
+#   sniff_host.py --stages --stages-file motion_stages.txt   (run from tests\cam_user_motion)
+#   record_rtsp.py --stages            (this file is its default)
+# Format: name: what to do. Stage names decide how the analysis treats a stage (see common.py):
+#   contains control/away/outside/behind    -> control: you move, but the camera cannot see it
+#   contains present                        -> present: you are in view but standing still
+#   contains empty (or still)               -> empty: nobody in view (the baseline for all ratios)
+#   contains motion/wave/walk/dance/move    -> motion in front of the camera
+#   anything else                           -> other: listed per stage, left out of the comparisons
+# Keep the lighting the same throughout (IR night mode switching changes the bitrate on its own).
+# The control comes first and the camera is never turned, so every stage films the same scene
+# (turning it to a wall changes the scene itself and shifts the frame sizes without any motion).
+# Run 2026-11-22 15:36 showed why empty and present are separate: standing still in view already
+# made P-frames 1.47x larger than the empty room (breathing, small sways, exposure adjusting).
+control_away: Stand BEHIND the camera, out of its view. Wave your arms and walk around there. Do not move or turn the camera.
+empty_1: Step out of the camera's view. Nothing in view moves.
+wave_1: Stand 1-2 m in front of the camera and wave both arms continuously.
+empty_2: Step out of view again. Nothing in view moves.
+walk_1: Walk back and forth across the camera's view, 1-3 m away, without stopping.
+present_1: Stand IN view, 1-2 m from the camera, as still as you can.
+dance_1: Move your whole body in front of the camera (dance, jump, swing arms).
+present_2: Stand IN view again, as still as you can.
+# Lighting stages: nobody in view, only the light changes. Their names match no kind, so they are
+# listed per stage but left out of the comparisons. Night vision stays on AUTO (do not open the
+# Tapo app during the run). Note the stopwatch time of every switch, so spikes and extra key
+# frames can be matched to each switch.
+lights_toggle: Stay out of view. Switch the room light off and on every 10 s. Note the time of each switch.
+settle_after_lights: Light on, nobody in view. Let the camera's exposure settle.
+lights_off_nightmode: Stay out of view. Switch the light off at the start and leave it off (the camera should switch to IR night mode).
+settle_after_night: Switch the light back on, stay out of view, and wait for the camera to return to colour.

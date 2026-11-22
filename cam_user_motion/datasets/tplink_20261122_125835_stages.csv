@@ -1,0 +1,2 @@
+stage,name,start_time,end_time,duration_s,frames,first_frame,last_frame,ended,wireshark_filter
+1,still_1,2026-11-22 12:58:43.886,2026-11-22 12:59:43.886,60.0,900,,,complete,
